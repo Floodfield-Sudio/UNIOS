@@ -955,7 +955,7 @@ Exemple GDT minimale :
 
 ## Conclusion
 
-UniversalOS est conçu comme un système modulaire et évolutif. Les trois stages actuels forment une base solide pour :
+UniOS est conçu comme un système modulaire et évolutif. Les trois stages actuels forment une base solide pour :
 
 1. **Diagnostiquer** n'importe quelle machine (Stage 2 actuel)
 2. **Détecter** automatiquement l'architecture (Stage 0)
