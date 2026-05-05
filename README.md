@@ -969,5 +969,5 @@ La correction du système AZERTY démontre l'attention portée à l'utilisabilit
 
 **Version** : 1.0  
 **Date** : 2026  
-**Auteur** : UniversalOS Team  
+**Auteur** : F.F.S. 
 **License** : Open Source
