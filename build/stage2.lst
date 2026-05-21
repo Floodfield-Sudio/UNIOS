@@ -1,0 +1,1835 @@
+     1                                  ; =============================================================================
+     2                                  ; UNIOS - STAGE 2 : Diagnostic Shell (Real Mode)                  v0.6
+     3                                  ; =============================================================================
+     4                                  ; Loaded at 0x9000. Interactive shell.
+     5                                  ;
+     6                                  ; Commands: help, cpu, mem, arch, disk, clear, reboot, exit,
+     7                                  ;           kbd, lg, install
+     8                                  ;
+     9                                  ; New in v0.4:
+    10                                  ;   exit    — ACPI / APM power-off
+    11                                  ;   install — Stage 3 install guide
+    12                                  ;   lg      — Set language: lg en-us | lg fr-fr
+    13                                  ;   kbd     — Toggle QWERTY / AZERTY (saves to INFO_BLOCK)
+    14                                  ;   ↑ / ↓   — Command history navigation (10 entries)
+    15                                  ;   Persistent settings in INFO_BLOCK+0x10 (lang) / +0x11 (kbd)
+    16                                  ;
+    17                                  ; Memory layout:
+    18                                  ;   0x0500  INFO_BLOCK   (shared with Stage 0/1)
+    19                                  ;   0x2000  E820_MAP
+    20                                  ;   0x5000  CPU brand string temp buffer
+    21                                  ;   0x6000  INPUT_BUF    (current input line, 200 bytes)
+    22                                  ;   0x6300  HIST_BUF     (command history, 10 × 80 bytes)
+    23                                  ;   0x7C00  [Stack boundary — do not cross]
+    24                                  ;   0x9000  Stage 2 code (here)
+    25                                  ; =============================================================================
+    26                                  
+    27                                  [BITS 16]
+    28                                  [ORG 0x9000]
+    29                                  
+    30                                  INFO_BLOCK   equ 0x0500
+    31                                  E820_MAP     equ 0x2000
+    32                                  INPUT_BUF    equ 0x6000
+    33                                  INPUT_MAX    equ 200
+    34                                  HIST_BUF     equ 0x6300       ; history ring buffer
+    35                                  HIST_MAX     equ 10            ; max history entries
+    36                                  HIST_LEN     equ 80            ; max chars per entry (including null)
+    37                                  LANG_COUNT   equ 12           ; locale presets
+    38                                  KBD_COUNT    equ 12           ; keyboard presets
+    39                                  
+    40                                  ; =============================================================================
+    41                                  ; Entry point
+    42                                  ; =============================================================================
+    43                                  _start:
+    44 00000000 FA                          cli
+    45 00000001 31C0                        xor  ax, ax
+    46 00000003 8ED8                        mov  ds, ax
+    47 00000005 8EC0                        mov  es, ax
+    48 00000007 8ED0                        mov  ss, ax
+    49 00000009 BC008F                      mov  sp, 0x8F00             ; stack below Stage 2 code
+    50 0000000C FB                          sti
+    51                                  
+    52                                      ; Load persistent settings saved by Stage 1 / previous session
+    53 0000000D A01005                      mov  al, [INFO_BLOCK + 0x10]
+    54 00000010 A2[9914]                    mov  [lang_id], al         ; locale preset
+    55 00000013 A01105                      mov  al, [INFO_BLOCK + 0x11]
+    56 00000016 A2[9A14]                    mov  [kbd_layout], al       ; keyboard preset
+    57                                  
+    58                                      ; Initialise history state
+    59 00000019 C706[9B14]0000              mov  word [hist_head],  0
+    60 0000001F C706[9D14]0000              mov  word [hist_count], 0
+    61 00000025 C706[9F14]FFFF              mov  word [hist_cur],   0xFFFF
+    62                                  
+    63 0000002B B80300                      mov  ax, 0x0003             ; 80×25 text mode
+    64 0000002E CD10                        int  0x10
+    65                                  
+    66                                      ; Make the hardware cursor visible and stable like a classic CMD prompt.
+    67 00000030 B401                        mov  ah, 0x01
+    68 00000032 B506                        mov  ch, 0x06
+    69 00000034 B107                        mov  cl, 0x07
+    70 00000036 CD10                        int  0x10
+    71                                  
+    72 00000038 BE[8B08]                    mov  si, msg_banner
+    73 0000003B E88D07                      call s2_puts
+    74 0000003E BE[BD08]                    mov  si, msg_prompt
+    75 00000041 E88707                      call s2_puts
+    76                                  
+    77                                  ; =============================================================================
+    78                                  ; Main shell loop
+    79                                  ; =============================================================================
+    80                                  shell_loop:
+    81 00000044 BE[DF08]                    mov  si, prompt
+    82 00000047 E88107                      call s2_puts
+    83                                  
+    84 0000004A BF0060                      mov  di, INPUT_BUF
+    85 0000004D B9C800                      mov  cx, INPUT_MAX
+    86 00000050 E85605                      call s2_readline
+    87                                  
+    88                                      ; Empty line → loop
+    89 00000053 803E006000                  cmp  byte [INPUT_BUF], 0
+    90 00000058 74EA                        je   shell_loop
+    91                                  
+    92                                      ; ── Command dispatch ─────────────────────────────────────────────────────
+    93 0000005A BE0060                      mov  si, INPUT_BUF
+    94 0000005D BF[EA0B]                    mov  di, cmd_help
+    95 00000060 E89207                      call s2_strcmp
+    96 00000063 0F849B00                    jz   cmd_help_fn
+    97                                  
+    98 00000067 BE0060                      mov  si, INPUT_BUF
+    99 0000006A BF[EF0B]                    mov  di, cmd_cpu
+   100 0000006D E88507                      call s2_strcmp
+   101 00000070 0F849700                    jz   cmd_cpu_fn
+   102                                  
+   103 00000074 BE0060                      mov  si, INPUT_BUF
+   104 00000077 BF[F30B]                    mov  di, cmd_mem
+   105 0000007A E87807                      call s2_strcmp
+   106 0000007D 0F848C01                    jz   cmd_mem_fn
+   107                                  
+   108 00000081 BE0060                      mov  si, INPUT_BUF
+   109 00000084 BF[F70B]                    mov  di, cmd_arch
+   110 00000087 E86B07                      call s2_strcmp
+   111 0000008A 0F84F801                    jz   cmd_arch_fn
+   112                                  
+   113 0000008E BE0060                      mov  si, INPUT_BUF
+   114 00000091 BF[FC0B]                    mov  di, cmd_disk
+   115 00000094 E85E07                      call s2_strcmp
+   116 00000097 0F849202                    jz   cmd_disk_fn
+   117                                  
+   118 0000009B BE0060                      mov  si, INPUT_BUF
+   119 0000009E BF[010C]                    mov  di, cmd_clear
+   120 000000A1 E85107                      call s2_strcmp
+   121 000000A4 0F84EB02                    jz   cmd_clear_fn
+   122                                  
+   123 000000A8 BE0060                      mov  si, INPUT_BUF
+   124 000000AB BF[070C]                    mov  di, cmd_reboot
+   125 000000AE E84407                      call s2_strcmp
+   126 000000B1 0F84E602                    jz   cmd_reboot_fn
+   127                                  
+   128 000000B5 BE0060                      mov  si, INPUT_BUF
+   129 000000B8 BF[0E0C]                    mov  di, cmd_exit
+   130 000000BB E83707                      call s2_strcmp
+   131 000000BE 0F84E402                    jz   cmd_exit_fn
+   132                                  
+   133 000000C2 BE0060                      mov  si, INPUT_BUF
+   134 000000C5 BF[130C]                    mov  di, cmd_kbd
+   135 000000C8 E82A07                      call s2_strcmp
+   136 000000CB 0F841903                    jz   cmd_kbd_fn
+   137                                  
+   138 000000CF BE0060                      mov  si, INPUT_BUF
+   139 000000D2 BF[170C]                    mov  di, cmd_install
+   140 000000D5 E81D07                      call s2_strcmp
+   141 000000D8 0F840303                    jz   cmd_install_fn
+   142                                  
+   143                                      ; Check "lg" prefix (with or without argument)
+   144 000000DC 803E00606C                  cmp  byte [INPUT_BUF + 0], 'l'
+   145 000000E1 7516                        jne  .not_lg
+   146 000000E3 803E016067                  cmp  byte [INPUT_BUF + 1], 'g'
+   147 000000E8 750F                        jne  .not_lg
+   148 000000EA A00260                      mov  al, [INPUT_BUF + 2]
+   149 000000ED 84C0                        test al, al             ; "lg" with no argument
+   150 000000EF 0F841F03                    jz   cmd_lg_fn
+   151 000000F3 3C20                        cmp  al, ' '            ; "lg en-us" / "lg fr-fr"
+   152 000000F5 0F841903                    je   cmd_lg_fn
+   153                                  .not_lg:
+   154                                  
+   155                                      ; Unknown command
+   156 000000F9 BE[E708]                    mov  si, msg_unknown
+   157 000000FC E8CC06                      call s2_puts
+   158 000000FF E942FF                      jmp  shell_loop
+   159                                  
+   160                                  ; =============================================================================
+   161                                  ; COMMAND: help
+   162                                  ; =============================================================================
+   163                                  cmd_help_fn:
+   164 00000102 BE[0709]                    mov  si, help_text
+   165 00000105 E8C306                      call s2_puts
+   166 00000108 E939FF                      jmp  shell_loop
+   167                                  
+   168                                  ; =============================================================================
+   169                                  ; COMMAND: cpu
+   170                                  ; =============================================================================
+   171                                  cmd_cpu_fn:
+   172 0000010B BE[1F0C]                    mov  si, msg_cpu_vendor
+   173 0000010E E8BA06                      call s2_puts
+   174 00000111 BE0005                      mov  si, INFO_BLOCK
+   175 00000114 E8B406                      call s2_puts
+   176 00000117 E8CE06                      call s2_crlf
+   177                                  
+   178 0000011A BE[300C]                    mov  si, msg_cpu_mode
+   179 0000011D E8AB06                      call s2_puts
+   180 00000120 A00C05                      mov  al, [INFO_BLOCK + 0x0C]
+   181 00000123 3C01                        cmp  al, 1
+   182 00000125 740C                        je   .mode_64
+   183 00000127 3C00                        cmp  al, 0
+   184 00000129 7410                        je   .mode_32
+   185 0000012B BE[5F0C]                    mov  si, msg_cpu_old
+   186 0000012E E89A06                      call s2_puts
+   187 00000131 EB0E                        jmp  .after_mode
+   188                                  .mode_64:
+   189 00000133 BE[410C]                    mov  si, msg_cpu_64
+   190 00000136 E89206                      call s2_puts
+   191 00000139 EB06                        jmp  .after_mode
+   192                                  .mode_32:
+   193 0000013B BE[560C]                    mov  si, msg_cpu_32
+   194 0000013E E88A06                      call s2_puts
+   195                                  .after_mode:
+   196                                  
+   197 00000141 66B801000000                mov  eax, 1
+   198 00000147 0FA2                        cpuid
+   199 00000149 6689C3                      mov  ebx, eax
+   200                                  
+   201 0000014C 6689D8                      mov  eax, ebx
+   202 0000014F 66C1E808                    shr  eax, 8
+   203 00000153 6683E00F                    and  eax, 0x0F
+   204 00000157 BE[740C]                    mov  si, msg_cpu_family
+   205 0000015A E86E06                      call s2_puts
+   206 0000015D E8AD06                      call s2_print_dec
+   207 00000160 E88506                      call s2_crlf
+   208                                  
+   209 00000163 6689D8                      mov  eax, ebx
+   210 00000166 66C1E804                    shr  eax, 4
+   211 0000016A 6683E00F                    and  eax, 0x0F
+   212 0000016E BE[850C]                    mov  si, msg_cpu_model
+   213 00000171 E85706                      call s2_puts
+   214 00000174 E89606                      call s2_print_dec
+   215 00000177 E86E06                      call s2_crlf
+   216                                  
+   217 0000017A 6689D8                      mov  eax, ebx
+   218 0000017D 6683E00F                    and  eax, 0x0F
+   219 00000181 BE[960C]                    mov  si, msg_cpu_stepping
+   220 00000184 E84406                      call s2_puts
+   221 00000187 E88306                      call s2_print_dec
+   222 0000018A E85B06                      call s2_crlf
+   223                                  
+   224 0000018D 66B800000080                mov  eax, 0x80000000
+   225 00000193 0FA2                        cpuid
+   226 00000195 663D04000080                cmp  eax, 0x80000004
+   227 0000019B 726D                        jb   .no_brand
+   228                                  
+   229 0000019D BE[A70C]                    mov  si, msg_cpu_brand
+   230 000001A0 E82806                      call s2_puts
+   231                                  
+   232 000001A3 66BF00500000                mov  edi, 0x5000
+   233 000001A9 66B802000080                mov  eax, 0x80000002
+   234 000001AF 0FA2                        cpuid
+   235 000001B1 67668907                    mov  [edi + 0], eax
+   236 000001B5 6766895F04                  mov  [edi + 4], ebx
+   237 000001BA 6766894F08                  mov  [edi + 8], ecx
+   238 000001BF 676689570C                  mov  [edi +12], edx
+   239                                  
+   240 000001C4 66B803000080                mov  eax, 0x80000003
+   241 000001CA 0FA2                        cpuid
+   242 000001CC 6766894710                  mov  [edi +16], eax
+   243 000001D1 6766895F14                  mov  [edi +20], ebx
+   244 000001D6 6766894F18                  mov  [edi +24], ecx
+   245 000001DB 676689571C                  mov  [edi +28], edx
+   246                                  
+   247 000001E0 66B804000080                mov  eax, 0x80000004
+   248 000001E6 0FA2                        cpuid
+   249 000001E8 6766894720                  mov  [edi +32], eax
+   250 000001ED 6766895F24                  mov  [edi +36], ebx
+   251 000001F2 6766894F28                  mov  [edi +40], ecx
+   252 000001F7 676689572C                  mov  [edi +44], edx
+   253                                  
+   254 000001FC 67C6473000                  mov  byte [edi +48], 0
+   255 00000201 BE0050                      mov  si, 0x5000
+   256 00000204 E8C405                      call s2_puts
+   257 00000207 E8DE05                      call s2_crlf
+   258                                  
+   259                                  .no_brand:
+   260 0000020A E937FE                      jmp  shell_loop
+   261                                  
+   262                                  ; =============================================================================
+   263                                  ; COMMAND: mem
+   264                                  ; =============================================================================
+   265                                  cmd_mem_fn:
+   266 0000020D 660FB70EFE1F                movzx ecx, word [E820_MAP - 2]
+   267 00000213 6685C9                      test  ecx, ecx
+   268 00000216 7465                        jz    .no_map
+   269                                  
+   270 00000218 BE[B80C]                    mov   si, msg_mem_header
+   271 0000021B E8AD05                      call  s2_puts
+   272                                  
+   273 0000021E BE0020                      mov   si, E820_MAP
+   274                                  .print_loop:
+   275 00000221 51                          push  cx
+   276 00000222 56                          push  si
+   277                                  
+   278 00000223 668B04                      mov   eax, [si + 0]
+   279 00000226 E80506                      call  s2_print_hex32
+   280 00000229 B020                        mov   al, ' '
+   281 0000022B E8AF05                      call  s2_putc
+   282                                  
+   283 0000022E 668B4408                    mov   eax, [si + 8]
+   284 00000232 E8F905                      call  s2_print_hex32
+   285 00000235 B020                        mov   al, ' '
+   286 00000237 E8A305                      call  s2_putc
+   287                                  
+   288 0000023A 668B4410                    mov   eax, [si + 16]
+   289 0000023E 6683F801                    cmp   eax, 1
+   290 00000242 7417                        je    .type_usable
+   291 00000244 6683F802                    cmp   eax, 2
+   292 00000248 7416                        je    .type_reserved
+   293 0000024A 6683F803                    cmp   eax, 3
+   294 0000024E 7415                        je    .type_acpi_reclaim
+   295 00000250 6683F804                    cmp   eax, 4
+   296 00000254 7414                        je    .type_acpi_nvs
+   297 00000256 BE[3B0D]                    mov   si, msg_type_unknown
+   298 00000259 EB12                        jmp   .type_done
+   299                                  .type_usable:
+   300 0000025B BE[110D]                    mov   si, msg_type_usable
+   301 0000025E EB0D                        jmp   .type_done
+   302                                  .type_reserved:
+   303 00000260 BE[1C0D]                    mov   si, msg_type_reserved
+   304 00000263 EB08                        jmp   .type_done
+   305                                  .type_acpi_reclaim:
+   306 00000265 BE[250D]                    mov   si, msg_type_acpi_reclaim
+   307 00000268 EB03                        jmp   .type_done
+   308                                  .type_acpi_nvs:
+   309 0000026A BE[320D]                    mov   si, msg_type_acpi_nvs
+   310                                  .type_done:
+   311 0000026D E85B05                      call  s2_puts
+   312 00000270 E87505                      call  s2_crlf
+   313                                  
+   314 00000273 5E                          pop   si
+   315 00000274 83C618                      add   si, 24
+   316 00000277 59                          pop   cx
+   317 00000278 E2A7                        loop  .print_loop
+   318                                  
+   319 0000027A E9C7FD                      jmp   shell_loop
+   320                                  
+   321                                  .no_map:
+   322 0000027D BE[430D]                    mov   si, msg_mem_fail
+   323 00000280 E84805                      call  s2_puts
+   324 00000283 E9BEFD                      jmp   shell_loop
+   325                                  
+   326                                  ; =============================================================================
+   327                                  ; COMMAND: arch
+   328                                  ; =============================================================================
+   329                                  cmd_arch_fn:
+   330 00000286 BE[5E0D]                    mov  si, msg_arch_summary
+   331 00000289 E83F05                      call s2_puts
+   332                                  
+   333 0000028C BE[1F0C]                    mov  si, msg_cpu_vendor
+   334 0000028F E83905                      call s2_puts
+   335 00000292 BE0005                      mov  si, INFO_BLOCK
+   336 00000295 E83305                      call s2_puts
+   337 00000298 E84D05                      call s2_crlf
+   338                                  
+   339 0000029B BE[300C]                    mov  si, msg_cpu_mode
+   340 0000029E E82A05                      call s2_puts
+   341 000002A1 A00C05                      mov  al, [INFO_BLOCK + 0x0C]
+   342 000002A4 3C01                        cmp  al, 1
+   343 000002A6 740C                        je   .mode_64
+   344 000002A8 3C00                        cmp  al, 0
+   345 000002AA 7410                        je   .mode_32
+   346 000002AC BE[5F0C]                    mov  si, msg_cpu_old
+   347 000002AF E81905                      call s2_puts
+   348 000002B2 EB0E                        jmp  .after_mode
+   349                                  .mode_64:
+   350 000002B4 BE[410C]                    mov  si, msg_cpu_64
+   351 000002B7 E81105                      call s2_puts
+   352 000002BA EB06                        jmp  .after_mode
+   353                                  .mode_32:
+   354 000002BC BE[560C]                    mov  si, msg_cpu_32
+   355 000002BF E80905                      call s2_puts
+   356                                  .after_mode:
+   357                                  
+   358 000002C2 BE[740D]                    mov  si, msg_ram_label
+   359 000002C5 E80305                      call s2_puts
+   360 000002C8 660FB7060E05                movzx eax, word [INFO_BLOCK + 0x0E]
+   361 000002CE E83C05                      call s2_print_dec
+   362 000002D1 BE[850D]                    mov  si, msg_mb
+   363 000002D4 E8F404                      call s2_puts
+   364 000002D7 E80E05                      call s2_crlf
+   365                                  
+   366 000002DA BE[890D]                    mov  si, msg_boot_drive
+   367 000002DD E8EB04                      call s2_puts
+   368 000002E0 660FB6060D05                movzx eax, byte [INFO_BLOCK + 0x0D]
+   369 000002E6 E87305                      call s2_print_hex8
+   370 000002E9 E8FC04                      call s2_crlf
+   371                                  
+   372 000002EC BE[9C0D]                    mov  si, msg_arch_lang
+   373 000002EF E8D904                      call s2_puts
+   374 000002F2 31DB                        xor  bx, bx
+   375 000002F4 8A1E[9914]                  mov  bl, [lang_id]
+   376 000002F8 80FB0C                      cmp  bl, LANG_COUNT
+   377 000002FB 7202                        jb   .lang_ok
+   378 000002FD 31DB                        xor  bx, bx
+   379                                  .lang_ok:
+   380 000002FF D1E3                        shl  bx, 1
+   381 00000301 8BB7[A714]                  mov  si, [lang_display_table + bx]
+   382 00000305 E8C304                      call s2_puts
+   383 00000308 E8DD04                      call s2_crlf
+   384                                  
+   385 0000030B BE[AD0D]                    mov  si, msg_arch_kbd
+   386 0000030E E8BA04                      call s2_puts
+   387 00000311 31DB                        xor  bx, bx
+   388 00000313 8A1E[9A14]                  mov  bl, [kbd_layout]
+   389 00000317 80FB0C                      cmp  bl, KBD_COUNT
+   390 0000031A 7202                        jb   .kbd_ok
+   391 0000031C 31DB                        xor  bx, bx
+   392                                  .kbd_ok:
+   393 0000031E D1E3                        shl  bx, 1
+   394 00000320 8BB7[BF14]                  mov  si, [kbd_display_table + bx]
+   395 00000324 E8A404                      call s2_puts
+   396 00000327 E8BE04                      call s2_crlf
+   397                                  
+   398 0000032A E917FD                      jmp  shell_loop
+   399                                  
+   400                                  ; =============================================================================
+   401                                  ; COMMAND: disk
+   402                                  ; =============================================================================
+   403                                  cmd_disk_fn:
+   404 0000032D BE[BE0D]                    mov  si, msg_disk_info
+   405 00000330 E89804                      call s2_puts
+   406                                  
+   407 00000333 B408                        mov  ah, 0x08
+   408 00000335 8A160D05                    mov  dl, [INFO_BLOCK + 0x0D]
+   409 00000339 CD13                        int  0x13
+   410 0000033B 724D                        jc   .disk_fail
+   411                                  
+   412 0000033D 88C8                        mov  al, cl
+   413 0000033F 24C0                        and  al, 0xC0
+   414 00000341 C1E002                      shl  ax, 2
+   415 00000344 88EC                        mov  ah, ch
+   416 00000346 40                          inc  ax
+   417 00000347 50                          push ax
+   418                                  
+   419 00000348 88F0                        mov  al, dh
+   420 0000034A FEC0                        inc  al
+   421 0000034C 660FB6C0                    movzx eax, al
+   422 00000350 50                          push ax
+   423                                  
+   424 00000351 88C8                        mov  al, cl
+   425 00000353 243F                        and  al, 0x3F
+   426 00000355 660FB6C0                    movzx eax, al
+   427                                  
+   428 00000359 BE[E70D]                    mov  si, msg_disk_cyl
+   429 0000035C E86C04                      call s2_puts
+   430 0000035F 58                          pop  ax
+   431 00000360 50                          push ax
+   432 00000361 E8A904                      call s2_print_dec
+   433 00000364 E88104                      call s2_crlf
+   434                                  
+   435 00000367 BE[F80D]                    mov  si, msg_disk_heads
+   436 0000036A E85E04                      call s2_puts
+   437 0000036D 58                          pop  ax
+   438 0000036E 5B                          pop  bx
+   439 0000036F 53                          push bx
+   440 00000370 50                          push ax
+   441 00000371 89D8                        mov  ax, bx
+   442 00000373 E89704                      call s2_print_dec
+   443 00000376 E86F04                      call s2_crlf
+   444                                  
+   445 00000379 BE[090E]                    mov  si, msg_disk_sect
+   446 0000037C E84C04                      call s2_puts
+   447 0000037F 58                          pop  ax
+   448 00000380 5B                          pop  bx
+   449 00000381 E88904                      call s2_print_dec
+   450 00000384 E86104                      call s2_crlf
+   451                                  
+   452 00000387 E9BAFC                      jmp  shell_loop
+   453                                  
+   454                                  .disk_fail:
+   455 0000038A BE[1A0E]                    mov  si, msg_disk_fail
+   456 0000038D E83B04                      call s2_puts
+   457 00000390 E9B1FC                      jmp  shell_loop
+   458                                  
+   459                                  ; =============================================================================
+   460                                  ; COMMAND: clear
+   461                                  ; =============================================================================
+   462                                  cmd_clear_fn:
+   463 00000393 B80300                      mov  ax, 0x0003
+   464 00000396 CD10                        int  0x10
+   465 00000398 E9A9FC                      jmp  shell_loop
+   466                                  
+   467                                  ; =============================================================================
+   468                                  ; COMMAND: reboot
+   469                                  ; =============================================================================
+   470                                  cmd_reboot_fn:
+   471 0000039B BE[340E]                    mov  si, msg_reboot
+   472 0000039E E82A04                      call s2_puts
+   473 000003A1 EA0000FFFF                  jmp  0xFFFF:0x0000
+   474                                  
+   475                                  ; =============================================================================
+   476                                  ; COMMAND: exit  — Power off via APM / ACPI
+   477                                  ; =============================================================================
+   478                                  cmd_exit_fn:
+   479 000003A6 BE[430E]                    mov  si, msg_exit
+   480 000003A9 E81F04                      call s2_puts
+   481                                  
+   482                                      ; --- Try APM power-off (works on QEMU and real hardware with APM BIOS) ---
+   483 000003AC B80153                      mov  ax, 0x5301         ; APM: connect (real-mode interface)
+   484 000003AF 31DB                        xor  bx, bx             ; device 0 = APM BIOS
+   485 000003B1 CD15                        int  0x15
+   486                                  
+   487 000003B3 B80853                      mov  ax, 0x5308         ; APM: enable power management for all devices
+   488 000003B6 BB0100                      mov  bx, 0x0001
+   489 000003B9 B90100                      mov  cx, 0x0001
+   490 000003BC CD15                        int  0x15
+   491                                  
+   492 000003BE B80753                      mov  ax, 0x5307         ; APM: set power state = off
+   493 000003C1 BB0100                      mov  bx, 0x0001         ; all devices
+   494 000003C4 B90300                      mov  cx, 0x0003         ; state = off
+   495 000003C7 CD15                        int  0x15
+   496                                  
+   497                                      ; --- Try ACPI port write (QEMU PIIX4 / Q35 default shutdown port) -------
+   498 000003C9 BA0406                      mov  dx, 0x604          ; QEMU ACPI power-management I/O port
+   499 000003CC B80020                      mov  ax, 0x2000         ; PM1_STS SLP_EN=1, SLP_TYP=0 (S5 off)
+   500 000003CF EF                          out  dx, ax
+   501                                  
+   502                                      ; --- Fallback: try legacy power port (VirtualBox / old BIOSes) ----------
+   503 000003D0 BA04B0                      mov  dx, 0xB004
+   504 000003D3 B80020                      mov  ax, 0x2000
+   505 000003D6 EF                          out  dx, ax
+   506                                  
+   507                                      ; --- Last resort: halt the CPU -------------------------------------------
+   508 000003D7 BE[560E]                    mov  si, msg_halt
+   509 000003DA E8EE03                      call s2_puts
+   510 000003DD FA                          cli
+   511 000003DE F4                          hlt
+   512                                  
+   513                                  ; =============================================================================
+   514                                  ; COMMAND: install  — Stage 3 installation guide
+   515                                  ; =============================================================================
+   516                                  cmd_install_fn:
+   517 000003DF BE[850F]                    mov  si, msg_install
+   518 000003E2 E8E603                      call s2_puts
+   519 000003E5 E95CFC                      jmp  shell_loop
+   520                                  
+   521                                  ; =============================================================================
+   522                                  ; COMMAND: kbd - Cycle keyboard presets
+   523                                  ; =============================================================================
+   524                                  cmd_kbd_fn:
+   525 000003E8 A0[9A14]                    mov  al, [kbd_layout]
+   526 000003EB FEC0                        inc  al
+   527 000003ED 3C0C                        cmp  al, KBD_COUNT
+   528 000003EF 7202                        jb   .store
+   529 000003F1 30C0                        xor  al, al
+   530                                  .store:
+   531 000003F3 A2[9A14]                    mov  [kbd_layout], al
+   532 000003F6 A21105                      mov  [INFO_BLOCK + 0x11], al   ; persist to INFO_BLOCK
+   533                                  
+   534 000003F9 BE[6414]                    mov  si, msg_kbd_set
+   535 000003FC E8CC03                      call s2_puts
+   536 000003FF 31DB                        xor  bx, bx
+   537 00000401 88C3                        mov  bl, al
+   538 00000403 D1E3                        shl  bx, 1
+   539 00000405 8BB7[BF14]                  mov  si, [kbd_display_table + bx]
+   540 00000409 E8BF03                      call s2_puts
+   541 0000040C E8D903                      call s2_crlf
+   542 0000040F E932FC                      jmp  shell_loop
+   543                                  
+   544                                  ; =============================================================================
+   545                                  ; COMMAND: lg - Set language / locale
+   546                                  ; =============================================================================
+   547                                  cmd_lg_fn:
+   548                                      ; Check for argument at INPUT_BUF+3
+   549 00000412 803E026020                  cmp  byte [INPUT_BUF + 2], ' '
+   550 00000417 757B                        jne  .show_current      ; no argument -> show current setting
+   551                                  
+   552 00000419 BE0060                      mov  si, INPUT_BUF
+   553 0000041C 83C603                      add  si, 3              ; skip "lg "
+   554                                  
+   555 0000041F 31DB                        xor  bx, bx             ; table offset (2 bytes / entry)
+   556                                  
+   557                                  .match_loop:
+   558 00000421 83FB18                      cmp  bx, LANG_COUNT * 2
+   559 00000424 7365                        jae  .unknown
+   560                                  
+   561 00000426 56                          push si
+   562 00000427 8BBF[D714]                  mov  di, [locale_code_table + bx]
+   563 0000042B E8C703                      call s2_strcmp
+   564 0000042E 5E                          pop  si
+   565 0000042F 7405                        jz   .found
+   566                                  
+   567 00000431 83C302                      add  bx, 2
+   568 00000434 EBEB                        jmp  .match_loop
+   569                                  
+   570                                  .found:
+   571 00000436 89D8                        mov  ax, bx
+   572 00000438 D1E8                        shr  ax, 1
+   573                                  
+   574 0000043A A2[9914]                    mov  [lang_id], al
+   575 0000043D A21005                      mov  [INFO_BLOCK + 0x10], al
+   576                                  
+   577 00000440 BE[EF14]                    mov  si, locale_default_kbd
+   578 00000443 01C6                        add  si, ax
+   579 00000445 8A04                        mov  al, [si]
+   580 00000447 A2[9A14]                    mov  [kbd_layout], al
+   581 0000044A A21105                      mov  [INFO_BLOCK + 0x11], al
+   582                                  
+   583 0000044D BE[6F14]                    mov  si, msg_lg_set
+   584 00000450 E87803                      call s2_puts
+   585                                  
+   586 00000453 31DB                        xor  bx, bx
+   587 00000455 8A1E[9914]                  mov  bl, [lang_id]
+   588 00000459 80FB0C                      cmp  bl, LANG_COUNT
+   589 0000045C 7202                        jb   .lang_ok
+   590 0000045E 31DB                        xor  bx, bx
+   591                                  .lang_ok:
+   592 00000460 D1E3                        shl  bx, 1
+   593 00000462 8BB7[A714]                  mov  si, [lang_display_table + bx]
+   594 00000466 E86203                      call s2_puts
+   595                                  
+   596 00000469 BE[8B14]                    mov  si, msg_lg_sep
+   597 0000046C E85C03                      call s2_puts
+   598                                  
+   599 0000046F 31DB                        xor  bx, bx
+   600 00000471 8A1E[9A14]                  mov  bl, [kbd_layout]
+   601 00000475 80FB0C                      cmp  bl, KBD_COUNT
+   602 00000478 7202                        jb   .kbd_ok
+   603 0000047A 31DB                        xor  bx, bx
+   604                                  .kbd_ok:
+   605 0000047C D1E3                        shl  bx, 1
+   606 0000047E 8BB7[BF14]                  mov  si, [kbd_display_table + bx]
+   607 00000482 E84603                      call s2_puts
+   608 00000485 E86003                      call s2_crlf
+   609 00000488 E9B9FB                      jmp  shell_loop
+   610                                  
+   611                                  .unknown:
+   612 0000048B BE[7D0E]                    mov  si, msg_lg_usage
+   613 0000048E E83A03                      call s2_puts
+   614 00000491 E9B0FB                      jmp  shell_loop
+   615                                  
+   616                                  .show_current:
+   617 00000494 BE[7A14]                    mov  si, msg_lg_current
+   618 00000497 E83103                      call s2_puts
+   619                                  
+   620 0000049A 31DB                        xor  bx, bx
+   621 0000049C 8A1E[9914]                  mov  bl, [lang_id]
+   622 000004A0 80FB0C                      cmp  bl, LANG_COUNT
+   623 000004A3 7202                        jb   .cur_lang_ok
+   624 000004A5 31DB                        xor  bx, bx
+   625                                  .cur_lang_ok:
+   626 000004A7 D1E3                        shl  bx, 1
+   627 000004A9 8BB7[A714]                  mov  si, [lang_display_table + bx]
+   628 000004AD E81B03                      call s2_puts
+   629                                  
+   630 000004B0 BE[8B14]                    mov  si, msg_lg_sep
+   631 000004B3 E81503                      call s2_puts
+   632                                  
+   633 000004B6 31DB                        xor  bx, bx
+   634 000004B8 8A1E[9A14]                  mov  bl, [kbd_layout]
+   635 000004BC 80FB0C                      cmp  bl, KBD_COUNT
+   636 000004BF 7202                        jb   .cur_kbd_ok
+   637 000004C1 31DB                        xor  bx, bx
+   638                                  .cur_kbd_ok:
+   639 000004C3 D1E3                        shl  bx, 1
+   640 000004C5 8BB7[BF14]                  mov  si, [kbd_display_table + bx]
+   641 000004C9 E8FF02                      call s2_puts
+   642 000004CC E81903                      call s2_crlf
+   643                                  
+   644 000004CF BE[7D0E]                    mov  si, msg_lg_usage
+   645 000004D2 E8F602                      call s2_puts
+   646 000004D5 E96CFB                      jmp  shell_loop
+   647                                  
+   648                                  ; =============================================================================
+   649                                  ; erase_n_chars; =============================================================================
+   650                                  ; erase_n_chars — Erase BX characters from terminal (BS-SP-BS each)
+   651                                  ; Preserves all registers.
+   652                                  ; =============================================================================
+   653                                  erase_n_chars:
+   654 000004D8 50                          push ax
+   655 000004D9 53                          push bx
+   656 000004DA 51                          push cx
+   657 000004DB 89D9                        mov  cx, bx
+   658 000004DD 30FF                        xor  bh, bh
+   659                                  .loop:
+   660 000004DF 85C9                        test cx, cx
+   661 000004E1 7411                        jz   .done
+   662 000004E3 B40E                        mov  ah, 0x0E
+   663 000004E5 B008                        mov  al, 8
+   664 000004E7 CD10                        int  0x10
+   665 000004E9 B020                        mov  al, ' '
+   666 000004EB CD10                        int  0x10
+   667 000004ED B008                        mov  al, 8
+   668 000004EF CD10                        int  0x10
+   669 000004F1 49                          dec  cx
+   670 000004F2 EBEB                        jmp  .loop
+   671                                  .done:
+   672 000004F4 59                          pop  cx
+   673 000004F5 5B                          pop  bx
+   674 000004F6 58                          pop  ax
+   675 000004F7 C3                          ret
+   676                                  
+   677                                  ; =============================================================================
+   678                                  ; hist_save_current — Save INPUT_BUF into history ring buffer
+   679                                  ; Call after a non-empty line is submitted (from inside s2_readline).
+   680                                  ; =============================================================================
+   681                                  hist_save_current:
+   682 000004F8 50                          push ax
+   683 000004F9 56                          push si
+   684 000004FA 57                          push di
+   685 000004FB 51                          push cx
+   686                                  
+   687                                      ; Destination = HIST_BUF + hist_head * HIST_LEN
+   688 000004FC A1[9B14]                    mov  ax, [hist_head]
+   689 000004FF B95000                      mov  cx, HIST_LEN
+   690 00000502 F7E1                        mul  cx                 ; AX = offset (fits in 16 bits: max 9*80=720)
+   691 00000504 050063                      add  ax, HIST_BUF
+   692 00000507 89C7                        mov  di, ax
+   693                                  
+   694                                      ; Copy INPUT_BUF → slot (null-terminated, max HIST_LEN-1)
+   695 00000509 BE0060                      mov  si, INPUT_BUF
+   696 0000050C B94F00                      mov  cx, HIST_LEN - 1
+   697                                  .copy:
+   698 0000050F AC                          lodsb
+   699 00000510 AA                          stosb
+   700 00000511 84C0                        test al, al
+   701 00000513 7405                        jz   .done
+   702 00000515 E2F8                        loop .copy
+   703 00000517 C60500                      mov  byte [di], 0       ; force null termination
+   704                                  .done:
+   705                                  
+   706                                      ; Advance hist_head (ring wrap)
+   707 0000051A A1[9B14]                    mov  ax, [hist_head]
+   708 0000051D 40                          inc  ax
+   709 0000051E 83F80A                      cmp  ax, HIST_MAX
+   710 00000521 7202                        jb   .no_wrap
+   711 00000523 31C0                        xor  ax, ax
+   712                                  .no_wrap:
+   713 00000525 A3[9B14]                    mov  [hist_head], ax
+   714                                  
+   715                                      ; Increment count (cap at HIST_MAX)
+   716 00000528 A1[9D14]                    mov  ax, [hist_count]
+   717 0000052B 83F80A                      cmp  ax, HIST_MAX
+   718 0000052E 7D04                        jge  .skip_inc
+   719 00000530 40                          inc  ax
+   720 00000531 A3[9D14]                    mov  [hist_count], ax
+   721                                  .skip_inc:
+   722                                  
+   723                                      ; Reset navigation cursor
+   724 00000534 C706[9F14]FFFF              mov  word [hist_cur], 0xFFFF
+   725                                  
+   726 0000053A 59                          pop  cx
+   727 0000053B 5F                          pop  di
+   728 0000053C 5E                          pop  si
+   729 0000053D 58                          pop  ax
+   730 0000053E C3                          ret
+   731                                  
+   732                                  ; =============================================================================
+   733                                  ; hist_get_ptr — Return SI pointing to history entry AX (0=newest)
+   734                                  ; Uses ring buffer: actual_idx = (hist_head - 1 - AX + 1000) % HIST_MAX
+   735                                  ; Clobbers nothing (saves/restores BX, CX, DX).
+   736                                  ; =============================================================================
+   737                                  hist_get_ptr:
+   738 0000053F 50                          push ax
+   739 00000540 53                          push bx
+   740 00000541 51                          push cx
+   741 00000542 52                          push dx
+   742                                  
+   743 00000543 89C3                        mov  bx, ax             ; BX = relative index
+   744 00000545 A1[9B14]                    mov  ax, [hist_head]    ; AX = hist_head (next-write slot)
+   745 00000548 48                          dec  ax                 ; -1 → most-recent slot
+   746 00000549 29D8                        sub  ax, bx             ; -relative
+   747 0000054B 05E803                      add  ax, 1000           ; ensure positive (HIST_MAX*100)
+   748 0000054E 31D2                        xor  dx, dx
+   749 00000550 B90A00                      mov  cx, HIST_MAX
+   750 00000553 F7F1                        div  cx                 ; DX = actual_idx in ring buffer
+   751                                  
+   752                                      ; SI = HIST_BUF + actual_idx * HIST_LEN
+   753 00000555 89D0                        mov  ax, dx
+   754 00000557 B95000                      mov  cx, HIST_LEN
+   755 0000055A F7E1                        mul  cx                 ; AX = actual_idx * HIST_LEN (≤720, fits in AX)
+   756 0000055C 050063                      add  ax, HIST_BUF
+   757 0000055F 89C6                        mov  si, ax
+   758                                  
+   759 00000561 5A                          pop  dx
+   760 00000562 59                          pop  cx
+   761 00000563 5B                          pop  bx
+   762 00000564 58                          pop  ax
+   763 00000565 C3                          ret
+   764                                  
+   765                                  ; =============================================================================
+   766                                  ; hist_load_entry - Load history[hist_cur] into buffer at DI, update BX length
+   767                                  ; Returns BX = length, buffer is null-terminated.
+   768                                  ; =============================================================================
+   769                                  hist_load_entry:
+   770 00000566 50                          push ax
+   771 00000567 56                          push si
+   772                                  
+   773                                      ; Get pointer to the entry
+   774 00000568 A1[9F14]                    mov  ax, [hist_cur]
+   775 0000056B E8D1FF                      call hist_get_ptr       ; SI = entry pointer
+   776                                  
+   777                                      ; Copy to DI buffer, count into BX
+   778 0000056E 31DB                        xor  bx, bx
+   779                                  .copy:
+   780 00000570 AC                          lodsb
+   781 00000571 84C0                        test al, al
+   782 00000573 740B                        jz   .done
+   783 00000575 81FBC700                    cmp  bx, INPUT_MAX - 1
+   784 00000579 7305                        jae  .done
+   785 0000057B 8801                        mov  [di + bx], al
+   786 0000057D 43                          inc  bx
+   787 0000057E EBF0                        jmp  .copy
+   788                                  .done:
+   789 00000580 C60100                      mov  byte [di + bx], 0
+   790                                  
+   791 00000583 5E                          pop  si
+   792 00000584 58                          pop  ax
+   793 00000585 C3                          ret
+   794                                  
+   795                                  ; =============================================================================
+   796                                  ; s2_set_cursor_offset - Position the cursor at prompt-start + AX columns.
+   797                                  ; Input:  AX = offset from the beginning of the current command line.
+   798                                  ; Uses:   [rl_start_row], [rl_start_col].
+   799                                  ; =============================================================================
+   800                                  s2_set_cursor_offset:
+   801 00000586 53                          push bx
+   802 00000587 51                          push cx
+   803                                  
+   804 00000588 31DB                        xor  bx, bx
+   805 0000058A 8A1E[A214]                  mov  bl, [rl_start_col]
+   806 0000058E 01D8                        add  ax, bx
+   807                                  
+   808 00000590 31D2                        xor  dx, dx
+   809 00000592 BB5000                      mov  bx, 80
+   810 00000595 F7F3                        div  bx                 ; AX = row delta, DX = column
+   811                                  
+   812 00000597 89C1                        mov  cx, ax             ; CX = row delta
+   813 00000599 A0[A114]                    mov  al, [rl_start_row]
+   814 0000059C 00C8                        add  al, cl
+   815 0000059E 88C6                        mov  dh, al
+   816                                      ; DL already contains the column
+   817                                  
+   818 000005A0 B402                        mov  ah, 0x02
+   819 000005A2 30FF                        xor  bh, bh
+   820 000005A4 CD10                        int  0x10
+   821                                  
+   822 000005A6 59                          pop  cx
+   823 000005A7 5B                          pop  bx
+   824 000005A8 C3                          ret
+   825                                  
+   826                                  ; =============================================================================
+   827                                  ; s2_readline - Read one line from keyboard into [DI], max CX chars.
+   828                                  ; Supports: Backspace, Delete, Enter, Left/Right cursor movement,
+   829                                  ; Home/End, Up/Down history navigation.
+   830                                  ; On entry: DI = buffer address, CX = max chars including room for null.
+   831                                  ; On exit:  [DI] = null-terminated string.
+   832                                  ; =============================================================================
+   833                                  s2_readline:
+   834 000005A9 50                          push ax
+   835 000005AA 53                          push bx
+   836 000005AB 51                          push cx
+   837 000005AC 52                          push dx
+   838 000005AD 56                          push si
+   839 000005AE 57                          push di
+   840 000005AF 55                          push bp
+   841                                  
+   842                                      ; Capture the current cursor position where the prompt ends.
+   843 000005B0 B403                        mov  ah, 0x03
+   844 000005B2 30FF                        xor  bh, bh
+   845 000005B4 CD10                        int  0x10
+   846 000005B6 8836[A114]                  mov  [rl_start_row], dh
+   847 000005BA 8816[A214]                  mov  [rl_start_col], dl
+   848                                  
+   849 000005BE 89C8                        mov  ax, cx
+   850 000005C0 48                          dec  ax
+   851 000005C1 A3[A514]                    mov  [rl_max], ax
+   852                                  
+   853 000005C4 31DB                        xor  bx, bx             ; BX = current length
+   854 000005C6 31D2                        xor  dx, dx             ; DX = cursor position within the buffer
+   855 000005C8 C706[A314]0000              mov  word [rl_prev_len], 0
+   856 000005CE C706[9F14]FFFF              mov  word [hist_cur], 0xFFFF
+   857 000005D4 C60500                      mov  byte [di], 0
+   858                                  
+   859                                  .loop:
+   860 000005D7 30E4                        xor  ah, ah
+   861 000005D9 CD16                        int  0x16
+   862                                  
+   863 000005DB 3C0D                        cmp  al, 13
+   864 000005DD 0F842F01                    je   .enter
+   865 000005E1 3C08                        cmp  al, 8
+   866 000005E3 7440                        je   .backspace
+   867                                  
+   868 000005E5 84C0                        test al, al
+   869 000005E7 745E                        jz   .special
+   870 000005E9 3CE0                        cmp  al, 0xE0
+   871 000005EB 745A                        je   .special
+   872                                  
+   873 000005ED 3B1E[A514]                  cmp  bx, [rl_max]
+   874 000005F1 73E4                        jae  .loop
+   875                                  
+   876 000005F3 E8A201                      call map_scancode
+   877                                  
+   878 000005F6 39DA                        cmp  dx, bx
+   879 000005F8 741A                        je   .append
+   880                                  
+   881                                      ; Insert at cursor: shift tail right by one byte.
+   882 000005FA 57                          push di                 ; keep buffer base for the terminator write
+   883 000005FB 89FD                        mov  bp, di
+   884 000005FD 01D5                        add  bp, dx
+   885 000005FF 89FE                        mov  si, di
+   886 00000601 01DE                        add  si, bx
+   887 00000603 89F7                        mov  di, si
+   888 00000605 47                          inc  di
+   889 00000606 89D8                        mov  ax, bx
+   890 00000608 29D0                        sub  ax, dx
+   891 0000060A 40                          inc  ax
+   892 0000060B 89C1                        mov  cx, ax
+   893 0000060D FD                          std
+   894 0000060E F3A4                        rep  movsb
+   895 00000610 FC                          cld
+   896 00000611 5F                          pop  di                 ; restore buffer base
+   897 00000612 EB04                        jmp  .store_char
+   898                                  
+   899                                  .append:
+   900 00000614 89FD                        mov  bp, di
+   901 00000616 01DD                        add  bp, bx
+   902                                  
+   903                                  .store_char:
+   904 00000618 884600                      mov  [bp], al
+   905 0000061B 43                          inc  bx
+   906 0000061C 42                          inc  dx
+   907 0000061D C60100                      mov  byte [di + bx], 0
+   908 00000620 E82D01                      call s2_redraw_line
+   909 00000623 EBB2                        jmp  .loop
+   910                                  
+   911                                  .backspace:
+   912 00000625 85D2                        test dx, dx
+   913 00000627 74AE                        jz   .loop
+   914 00000629 4A                          dec  dx
+   915                                  
+   916                                      ; Shift the tail left starting at the deleted character.
+   917 0000062A 57                          push di
+   918 0000062B 89FD                        mov  bp, di
+   919 0000062D 01D5                        add  bp, dx
+   920 0000062F 89EE                        mov  si, bp
+   921 00000631 46                          inc  si
+   922 00000632 89EF                        mov  di, bp
+   923 00000634 89D8                        mov  ax, bx
+   924 00000636 29D0                        sub  ax, dx
+   925 00000638 89C1                        mov  cx, ax
+   926 0000063A FC                          cld
+   927 0000063B F3A4                        rep  movsb
+   928 0000063D 4B                          dec  bx
+   929 0000063E 5F                          pop  di
+   930                                  
+   931 0000063F C60100                      mov  byte [di + bx], 0
+   932 00000642 E80B01                      call s2_redraw_line
+   933 00000645 EB90                        jmp  .loop
+   934                                  
+   935                                  .special:
+   936 00000647 80FC48                      cmp  ah, 0x48
+   937 0000064A 7471                        je   .hist_up
+   938 0000064C 80FC50                      cmp  ah, 0x50
+   939 0000064F 0F848D00                    je   .hist_down
+   940 00000653 80FC4B                      cmp  ah, 0x4B
+   941 00000656 7417                        je   .cursor_left
+   942 00000658 80FC4D                      cmp  ah, 0x4D
+   943 0000065B 741F                        je   .cursor_right
+   944 0000065D 80FC47                      cmp  ah, 0x47
+   945 00000660 7427                        je   .cursor_home
+   946 00000662 80FC4F                      cmp  ah, 0x4F
+   947 00000665 742A                        je   .cursor_end
+   948 00000667 80FC53                      cmp  ah, 0x53
+   949 0000066A 742D                        je   .delete_char
+   950 0000066C E968FF                      jmp  .loop
+   951                                  
+   952                                  .cursor_left:
+   953 0000066F 85D2                        test dx, dx
+   954 00000671 0F8462FF                    jz   .loop
+   955 00000675 4A                          dec  dx
+   956 00000676 E8D700                      call s2_redraw_line
+   957 00000679 E95BFF                      jmp  .loop
+   958                                  
+   959                                  .cursor_right:
+   960 0000067C 39DA                        cmp  dx, bx
+   961 0000067E 0F8355FF                    jae  .loop
+   962 00000682 42                          inc  dx
+   963 00000683 E8CA00                      call s2_redraw_line
+   964 00000686 E94EFF                      jmp  .loop
+   965                                  
+   966                                  .cursor_home:
+   967 00000689 31D2                        xor  dx, dx
+   968 0000068B E8C200                      call s2_redraw_line
+   969 0000068E E946FF                      jmp  .loop
+   970                                  
+   971                                  .cursor_end:
+   972 00000691 89DA                        mov  dx, bx
+   973 00000693 E8BA00                      call s2_redraw_line
+   974 00000696 E93EFF                      jmp  .loop
+   975                                  
+   976                                  .delete_char:
+   977 00000699 39DA                        cmp  dx, bx
+   978 0000069B 0F8338FF                    jae  .loop
+   979                                  
+   980                                      ; Delete the character under the cursor and compact the tail.
+   981 0000069F 57                          push di
+   982 000006A0 89FD                        mov  bp, di
+   983 000006A2 01D5                        add  bp, dx
+   984 000006A4 89EE                        mov  si, bp
+   985 000006A6 46                          inc  si
+   986 000006A7 89EF                        mov  di, bp
+   987 000006A9 89D8                        mov  ax, bx
+   988 000006AB 29D0                        sub  ax, dx
+   989 000006AD 89C1                        mov  cx, ax
+   990 000006AF FC                          cld
+   991 000006B0 F3A4                        rep  movsb
+   992 000006B2 4B                          dec  bx
+   993 000006B3 5F                          pop  di
+   994                                  
+   995 000006B4 C60100                      mov  byte [di + bx], 0
+   996 000006B7 E89600                      call s2_redraw_line
+   997 000006BA E91AFF                      jmp  .loop
+   998                                  
+   999                                  .hist_up:
+  1000 000006BD A1[9F14]                    mov  ax, [hist_cur]
+  1001 000006C0 83F8FF                      cmp  ax, 0xFFFF
+  1002 000006C3 7403                        je   .hist_up_start
+  1003 000006C5 40                          inc  ax
+  1004 000006C6 EB02                        jmp  .hist_up_check
+  1005                                  .hist_up_start:
+  1006 000006C8 31C0                        xor  ax, ax
+  1007                                  .hist_up_check:
+  1008 000006CA 3B06[9D14]                  cmp  ax, [hist_count]
+  1009 000006CE 0F8305FF                    jae  .loop
+  1010 000006D2 A3[9F14]                    mov  [hist_cur], ax
+  1011 000006D5 E88EFE                      call hist_load_entry
+  1012 000006D8 89DA                        mov  dx, bx
+  1013 000006DA E87300                      call s2_redraw_line
+  1014 000006DD E9F7FE                      jmp  .loop
+  1015                                  
+  1016                                  .hist_down:
+  1017 000006E0 A1[9F14]                    mov  ax, [hist_cur]
+  1018 000006E3 83F8FF                      cmp  ax, 0xFFFF
+  1019 000006E6 0F84EDFE                    je   .loop
+  1020 000006EA 85C0                        test ax, ax
+  1021 000006EC 740F                        jz   .hist_down_clear
+  1022 000006EE 48                          dec  ax
+  1023 000006EF A3[9F14]                    mov  [hist_cur], ax
+  1024 000006F2 E871FE                      call hist_load_entry
+  1025 000006F5 89DA                        mov  dx, bx
+  1026 000006F7 E85600                      call s2_redraw_line
+  1027 000006FA E9DAFE                      jmp  .loop
+  1028                                  
+  1029                                  .hist_down_clear:
+  1030 000006FD C60500                      mov  byte [di], 0
+  1031 00000700 31DB                        xor  bx, bx
+  1032 00000702 31D2                        xor  dx, dx
+  1033 00000704 C706[9F14]FFFF              mov  word [hist_cur], 0xFFFF
+  1034 0000070A E84300                      call s2_redraw_line
+  1035 0000070D E9C7FE                      jmp  .loop
+  1036                                  
+  1037                                  .enter:
+  1038 00000710 C60100                      mov  byte [di + bx], 0
+  1039 00000713 85DB                        test bx, bx
+  1040 00000715 7403                        jz   .skip_save
+  1041 00000717 E8DEFD                      call hist_save_current
+  1042                                  .skip_save:
+  1043 0000071A E8CB00                      call s2_crlf
+  1044                                  
+  1045 0000071D 5D                          pop  bp
+  1046 0000071E 5F                          pop  di
+  1047 0000071F 5E                          pop  si
+  1048 00000720 5A                          pop  dx
+  1049 00000721 59                          pop  cx
+  1050 00000722 5B                          pop  bx
+  1051 00000723 58                          pop  ax
+  1052 00000724 C3                          ret
+  1053                                  
+  1054                                  ; =============================================================================
+  1055                                  ; s2_line_vram_offset - Compute video memory offset for a line-relative position.
+  1056                                  ; Input:  AX = offset from the beginning of the current command line.
+  1057                                  ; Output: DI = byte offset in B800:0000 for text mode.
+  1058                                  ; Uses:   [rl_start_row], [rl_start_col].
+  1059                                  ; =============================================================================
+  1060                                  s2_line_vram_offset:
+  1061 00000725 53                          push bx
+  1062 00000726 51                          push cx
+  1063 00000727 52                          push dx
+  1064                                  
+  1065 00000728 31DB                        xor  bx, bx
+  1066 0000072A 8A1E[A214]                  mov  bl, [rl_start_col]
+  1067 0000072E 01D8                        add  ax, bx
+  1068                                  
+  1069 00000730 31D2                        xor  dx, dx
+  1070 00000732 BB5000                      mov  bx, 80
+  1071 00000735 F7F3                        div  bx                 ; AX = row delta, DX = column
+  1072                                  
+  1073 00000737 52                          push dx                 ; save column
+  1074 00000738 31DB                        xor  bx, bx
+  1075 0000073A 8A1E[A114]                  mov  bl, [rl_start_row]
+  1076 0000073E 01D8                        add  ax, bx             ; AX = absolute row
+  1077                                  
+  1078 00000740 BB5000                      mov  bx, 80
+  1079 00000743 F7E3                        mul  bx                 ; DX:AX = row * 80
+  1080 00000745 59                          pop  cx                 ; CX = column
+  1081 00000746 01C8                        add  ax, cx             ; + column
+  1082 00000748 D1E0                        shl  ax, 1              ; * 2 bytes per cell
+  1083 0000074A 89C7                        mov  di, ax
+  1084                                  
+  1085 0000074C 5A                          pop  dx
+  1086 0000074D 59                          pop  cx
+  1087 0000074E 5B                          pop  bx
+  1088 0000074F C3                          ret
+  1089                                  
+  1090                                  ; =============================================================================
+  1091                                  ; s2_redraw_line - Redraw the current input buffer and position the cursor.
+  1092                                  ; Input: DI = buffer, BX = current length, DX = cursor position.
+  1093                                  ; =============================================================================
+  1094                                  s2_redraw_line:
+  1095 00000750 50                          push ax
+  1096 00000751 53                          push bx
+  1097 00000752 51                          push cx
+  1098 00000753 52                          push dx
+  1099 00000754 56                          push si
+  1100 00000755 57                          push di
+  1101 00000756 06                          push es
+  1102                                  
+  1103                                      ; Draw directly into text video memory to avoid teletype artifacts.
+  1104 00000757 B800B8                      mov  ax, 0xB800
+  1105 0000075A 8EC0                        mov  es, ax
+  1106 0000075C FC                          cld
+  1107                                  
+  1108 0000075D 89FE                        mov  si, di
+  1109 0000075F 31C0                        xor  ax, ax
+  1110 00000761 E8C1FF                      call s2_line_vram_offset    ; DI = video offset for start of line
+  1111 00000764 89D9                        mov  cx, bx
+  1112                                  
+  1113 00000766 B407                        mov  ah, 0x07               ; light grey on black (classic text mode)
+  1114                                  .draw_chars:
+  1115 00000768 85C9                        test cx, cx
+  1116 0000076A 7405                        jz   .clear_tail
+  1117 0000076C AC                          lodsb
+  1118 0000076D AB                          stosw
+  1119 0000076E 49                          dec  cx
+  1120 0000076F EBF7                        jmp  .draw_chars
+  1121                                  
+  1122                                  .clear_tail:
+  1123 00000771 A1[A314]                    mov  ax, [rl_prev_len]
+  1124 00000774 39D8                        cmp  ax, bx
+  1125 00000776 760F                        jbe  .set_cursor
+  1126 00000778 29D8                        sub  ax, bx
+  1127 0000077A 89C1                        mov  cx, ax
+  1128 0000077C B82007                      mov  ax, 0x0720             ; space + attribute
+  1129                                  .clear_loop:
+  1130 0000077F 85C9                        test cx, cx
+  1131 00000781 7404                        jz   .set_cursor
+  1132 00000783 AB                          stosw
+  1133 00000784 49                          dec  cx
+  1134 00000785 EBF8                        jmp  .clear_loop
+  1135                                  
+  1136                                  .set_cursor:
+  1137 00000787 89D0                        mov  ax, dx
+  1138 00000789 E8FAFD                      call s2_set_cursor_offset
+  1139 0000078C 891E[A314]                  mov  [rl_prev_len], bx
+  1140                                  
+  1141 00000790 07                          pop  es
+  1142 00000791 5F                          pop  di
+  1143 00000792 5E                          pop  si
+  1144 00000793 5A                          pop  dx
+  1145 00000794 59                          pop  cx
+  1146 00000795 5B                          pop  bx
+  1147 00000796 58                          pop  ax
+  1148 00000797 C3                          ret
+  1149                                  
+  1150                                  ; =============================================================================
+  1151                                  ; map_scancode - Convert BIOS ASCII in AL from the active physical layout.
+  1152                                  ; kbd_layout selects one entry in kbd_map_table.
+  1153                                  ; =============================================================================
+  1154                                  map_scancode:
+  1155 00000798 53                          push bx
+  1156 00000799 56                          push si
+  1157 0000079A 57                          push di
+  1158                                  
+  1159 0000079B 8A1E[9A14]                  mov  bl, [kbd_layout]
+  1160 0000079F 80FB0C                      cmp  bl, KBD_COUNT
+  1161 000007A2 7202                        jb   .ok
+  1162 000007A4 30DB                        xor  bl, bl
+  1163                                  .ok:
+  1164 000007A6 30FF                        xor  bh, bh
+  1165 000007A8 D1E3                        shl  bx, 1
+  1166 000007AA 8BBF[FB14]                  mov  di, [kbd_map_table + bx]
+  1167 000007AE 81FF[1315]                  cmp  di, qwerty_chars
+  1168 000007B2 7413                        je   .done
+  1169                                  
+  1170 000007B4 BE[1315]                    mov  si, qwerty_chars
+  1171                                  .search:
+  1172 000007B7 8A1C                        mov  bl, [si]
+  1173 000007B9 84DB                        test bl, bl
+  1174 000007BB 740A                        jz   .done
+  1175 000007BD 38D8                        cmp  al, bl
+  1176 000007BF 7404                        je   .mapped
+  1177 000007C1 46                          inc  si
+  1178 000007C2 47                          inc  di
+  1179 000007C3 EBF2                        jmp  .search
+  1180                                  
+  1181                                  .mapped:
+  1182 000007C5 8A05                        mov  al, [di]
+  1183                                  
+  1184                                  .done:
+  1185 000007C7 5F                          pop  di
+  1186 000007C8 5E                          pop  si
+  1187 000007C9 5B                          pop  bx
+  1188 000007CA C3                          ret
+  1189                                  
+  1190                                  ; =============================================================================
+  1191                                  ; Utility functions
+  1192                                  ; =============================================================================
+  1193                                  s2_puts:
+  1194 000007CB 50                          push ax
+  1195 000007CC 53                          push bx
+  1196                                  .loop:
+  1197 000007CD AC                          lodsb
+  1198 000007CE 08C0                        or   al, al
+  1199 000007D0 7408                        jz   .done
+  1200 000007D2 B40E                        mov  ah, 0x0E
+  1201 000007D4 31DB                        xor  bx, bx
+  1202 000007D6 CD10                        int  0x10
+  1203 000007D8 EBF3                        jmp  .loop
+  1204                                  .done:
+  1205 000007DA 5B                          pop  bx
+  1206 000007DB 58                          pop  ax
+  1207 000007DC C3                          ret
+  1208                                  
+  1209                                  s2_putc:
+  1210 000007DD 50                          push ax
+  1211 000007DE 53                          push bx
+  1212 000007DF B40E                        mov  ah, 0x0E
+  1213 000007E1 31DB                        xor  bx, bx
+  1214 000007E3 CD10                        int  0x10
+  1215 000007E5 5B                          pop  bx
+  1216 000007E6 58                          pop  ax
+  1217 000007E7 C3                          ret
+  1218                                  
+  1219                                  s2_crlf:
+  1220 000007E8 50                          push ax
+  1221 000007E9 B00D                        mov  al, 13
+  1222 000007EB E8EFFF                      call s2_putc
+  1223 000007EE B00A                        mov  al, 10
+  1224 000007F0 E8EAFF                      call s2_putc
+  1225 000007F3 58                          pop  ax
+  1226 000007F4 C3                          ret
+  1227                                  
+  1228                                  s2_strcmp:
+  1229 000007F5 50                          push ax
+  1230                                  .loop:
+  1231 000007F6 AC                          lodsb
+  1232 000007F7 8A25                        mov  ah, [di]
+  1233 000007F9 47                          inc  di
+  1234 000007FA 38E0                        cmp  al, ah
+  1235 000007FC 7506                        jne  .not_equal
+  1236 000007FE 84C0                        test al, al
+  1237 00000800 7407                        jz   .equal
+  1238 00000802 EBF2                        jmp  .loop
+  1239                                  .not_equal:
+  1240 00000804 58                          pop  ax
+  1241 00000805 31C0                        xor  ax, ax
+  1242 00000807 40                          inc  ax
+  1243 00000808 C3                          ret
+  1244                                  .equal:
+  1245 00000809 58                          pop  ax
+  1246 0000080A 31C0                        xor  ax, ax
+  1247 0000080C C3                          ret
+  1248                                  
+  1249                                  s2_print_dec:
+  1250 0000080D 50                          push ax
+  1251 0000080E 53                          push bx
+  1252 0000080F 51                          push cx
+  1253 00000810 52                          push dx
+  1254                                  
+  1255 00000811 BB0A00                      mov  bx, 10
+  1256 00000814 31C9                        xor  cx, cx
+  1257                                  
+  1258                                  .push_loop:
+  1259 00000816 31D2                        xor  dx, dx
+  1260 00000818 F7F3                        div  bx
+  1261 0000081A 52                          push dx
+  1262 0000081B 41                          inc  cx
+  1263 0000081C 6685C0                      test eax, eax
+  1264 0000081F 75F5                        jnz  .push_loop
+  1265                                  
+  1266                                  .pop_loop:
+  1267 00000821 58                          pop  ax
+  1268 00000822 0430                        add  al, '0'
+  1269 00000824 E8B6FF                      call s2_putc
+  1270 00000827 E2F8                        loop .pop_loop
+  1271                                  
+  1272 00000829 5A                          pop  dx
+  1273 0000082A 59                          pop  cx
+  1274 0000082B 5B                          pop  bx
+  1275 0000082C 58                          pop  ax
+  1276 0000082D C3                          ret
+  1277                                  
+  1278                                  s2_print_hex32:
+  1279 0000082E 6650                        push eax
+  1280 00000830 6653                        push ebx
+  1281 00000832 6651                        push ecx
+  1282                                  
+  1283 00000834 66B908000000                mov  ecx, 8
+  1284 0000083A 6689C3                      mov  ebx, eax
+  1285                                  
+  1286                                  .loop:
+  1287 0000083D 66C1C304                    rol  ebx, 4
+  1288 00000841 6689D8                      mov  eax, ebx
+  1289 00000844 6683E00F                    and  eax, 0x0F
+  1290 00000848 0430                        add  al, '0'
+  1291 0000084A 3C39                        cmp  al, '9'
+  1292 0000084C 7602                        jbe  .digit
+  1293 0000084E 0407                        add  al, 7
+  1294                                  .digit:
+  1295 00000850 E88AFF                      call s2_putc
+  1296 00000853 E2E8                        loop .loop
+  1297                                  
+  1298 00000855 6659                        pop  ecx
+  1299 00000857 665B                        pop  ebx
+  1300 00000859 6658                        pop  eax
+  1301 0000085B C3                          ret
+  1302                                  
+  1303                                  s2_print_hex8:
+  1304 0000085C 6650                        push eax
+  1305 0000085E 6653                        push ebx
+  1306 00000860 6651                        push ecx
+  1307                                  
+  1308 00000862 660FB6D8                    movzx ebx, al
+  1309 00000866 66B902000000                mov   ecx, 2
+  1310                                  
+  1311                                  .loop:
+  1312 0000086C C0C304                      rol   bl, 4
+  1313 0000086F 660FB6C3                    movzx eax, bl
+  1314 00000873 6683E00F                    and   eax, 0x0F
+  1315 00000877 0430                        add   al, '0'
+  1316 00000879 3C39                        cmp   al, '9'
+  1317 0000087B 7602                        jbe   .digit
+  1318 0000087D 0407                        add   al, 7
+  1319                                  .digit:
+  1320 0000087F E85BFF                      call  s2_putc
+  1321 00000882 E2E8                        loop  .loop
+  1322                                  
+  1323 00000884 6659                        pop   ecx
+  1324 00000886 665B                        pop   ebx
+  1325 00000888 6658                        pop   eax
+  1326 0000088A C3                          ret
+  1327                                  
+  1328                                  ; =============================================================================
+  1329                                  ; Data
+  1330                                  ; =============================================================================
+  1331 0000088B 0D0A                    msg_banner      db 13,10
+  1332 0000088D 3D3D3D20554E494F53-                     db "=== UNIOS Stage 2 v0.5 - Diagnostic Shell ===",13,10,0
+  1332 00000896 205374616765203220-
+  1332 0000089F 76302E35202D204469-
+  1332 000008A8 61676E6F7374696320-
+  1332 000008B1 5368656C6C203D3D3D-
+  1332 000008BA 0D0A00             
+  1333 000008BD 54797065202768656C-     msg_prompt      db "Type 'help' for command list.",13,10,13,10,0
+  1333 000008C6 702720666F7220636F-
+  1333 000008CF 6D6D616E64206C6973-
+  1333 000008D8 742E0D0A0D0A00     
+  1334 000008DF 554E494F533E2000        prompt          db "UNIOS> ",0
+  1335                                  
+  1336 000008E7 556E6B6E6F776E2063-     msg_unknown     db "Unknown command. Type 'help'.",13,10,0
+  1336 000008F0 6F6D6D616E642E2054-
+  1336 000008F9 797065202768656C70-
+  1336 00000902 272E0D0A00         
+  1337                                  
+  1338 00000907 0D0A                    help_text       db 13,10
+  1339 00000909 436F6D6D616E64733A-                     db "Commands:",13,10
+  1339 00000912 0D0A               
+  1340 00000914 202068656C70202020-                     db "  help          Show this help",13,10
+  1340 0000091D 202020202020205368-
+  1340 00000926 6F7720746869732068-
+  1340 0000092F 656C700D0A         
+  1341 00000934 202063707520202020-                     db "  cpu           CPU info (vendor, mode, family, brand)",13,10
+  1341 0000093D 202020202020204350-
+  1341 00000946 5520696E666F202876-
+  1341 0000094F 656E646F722C206D6F-
+  1341 00000958 64652C2066616D696C-
+  1341 00000961 792C206272616E6429-
+  1341 0000096A 0D0A               
+  1342 0000096C 20206D656D20202020-                     db "  mem           Memory map (E820 table)",13,10
+  1342 00000975 202020202020204D65-
+  1342 0000097E 6D6F7279206D617020-
+  1342 00000987 284538323020746162-
+  1342 00000990 6C65290D0A         
+  1343 00000995 202061726368202020-                     db "  arch          Platform summary (CPU + RAM + drive)",13,10
+  1343 0000099E 20202020202020506C-
+  1343 000009A7 6174666F726D207375-
+  1343 000009B0 6D6D61727920284350-
+  1343 000009B9 55202B2052414D202B-
+  1343 000009C2 206472697665290D0A 
+  1344 000009CB 20206469736B202020-                     db "  disk          Disk geometry (BIOS INT 13h)",13,10
+  1344 000009D4 202020202020204469-
+  1344 000009DD 736B2067656F6D6574-
+  1344 000009E6 7279202842494F5320-
+  1344 000009EF 494E5420313368290D-
+  1344 000009F8 0A                 
+  1345 000009F9 20206B626420202020-                     db "  kbd           Cycle keyboard presets (QWERTY, AZERTY, QWERTZ, ...)",13,10
+  1345 00000A02 202020202020204379-
+  1345 00000A0B 636C65206B6579626F-
+  1345 00000A14 617264207072657365-
+  1345 00000A1D 747320285157455254-
+  1345 00000A26 592C20415A45525459-
+  1345 00000A2F 2C2051574552545A2C-
+  1345 00000A38 202E2E2E290D0A     
+  1346 00000A3F 20206C67203C6C6F63-                     db "  lg <locale>   Set locale: en-us fr-fr de-de es-es it-it pt-br ru-ru",13,10
+  1346 00000A48 616C653E2020205365-
+  1346 00000A51 74206C6F63616C653A-
+  1346 00000A5A 20656E2D7573206672-
+  1346 00000A63 2D66722064652D6465-
+  1346 00000A6C 2065732D6573206974-
+  1346 00000A75 2D69742070742D6272-
+  1346 00000A7E 2072752D72750D0A   
+  1347 00000A86 2020696E7374616C6C-                     db "  install       Stage 3 installation guide",13,10
+  1347 00000A8F 202020202020205374-
+  1347 00000A98 616765203320696E73-
+  1347 00000AA1 74616C6C6174696F6E-
+  1347 00000AAA 2067756964650D0A   
+  1348 00000AB2 2020636C6561722020-                     db "  clear         Clear screen",13,10
+  1348 00000ABB 20202020202020436C-
+  1348 00000AC4 656172207363726565-
+  1348 00000ACD 6E0D0A             
+  1349 00000AD0 20207265626F6F7420-                     db "  reboot        Restart machine",13,10
+  1349 00000AD9 202020202020205265-
+  1349 00000AE2 7374617274206D6163-
+  1349 00000AEB 68696E650D0A       
+  1350 00000AF1 202065786974202020-                     db "  exit          Power off machine",13,10
+  1350 00000AFA 20202020202020506F-
+  1350 00000B03 776572206F6666206D-
+  1350 00000B0C 616368696E650D0A   
+  1351 00000B14 20205B4C6566742F52-                     db "  [Left/Right]  Move within the current command line",13,10
+  1351 00000B1D 696768745D20204D6F-
+  1351 00000B26 76652077697468696E-
+  1351 00000B2F 207468652063757272-
+  1351 00000B38 656E7420636F6D6D61-
+  1351 00000B41 6E64206C696E650D0A 
+  1352 00000B4A 20205B486F6D652F45-                     db "  [Home/End]    Jump to start/end of the line",13,10
+  1352 00000B53 6E645D202020204A75-
+  1352 00000B5C 6D7020746F20737461-
+  1352 00000B65 72742F656E64206F66-
+  1352 00000B6E 20746865206C696E65-
+  1352 00000B77 0D0A               
+  1353 00000B79 20205B44656C5D2020-                     db "  [Del]         Delete the character under the cursor",13,10
+  1353 00000B82 202020202020204465-
+  1353 00000B8B 6C6574652074686520-
+  1353 00000B94 636861726163746572-
+  1353 00000B9D 20756E646572207468-
+  1353 00000BA6 6520637572736F720D-
+  1353 00000BAF 0A                 
+  1354 00000BB0 20205B55702F446F77-                     db "  [Up/Down]     Navigate command history (10 entries)",13,10
+  1354 00000BB9 6E5D20202020204E61-
+  1354 00000BC2 76696761746520636F-
+  1354 00000BCB 6D6D616E6420686973-
+  1354 00000BD4 746F72792028313020-
+  1354 00000BDD 656E7472696573290D-
+  1354 00000BE6 0A                 
+  1355 00000BE7 0D0A00                                  db 13,10,0
+  1356                                  
+  1357                                  ; Command strings
+  1358 00000BEA 68656C7000              cmd_help        db "help",0
+  1359 00000BEF 63707500                cmd_cpu         db "cpu",0
+  1360 00000BF3 6D656D00                cmd_mem         db "mem",0
+  1361 00000BF7 6172636800              cmd_arch        db "arch",0
+  1362 00000BFC 6469736B00              cmd_disk        db "disk",0
+  1363 00000C01 636C65617200            cmd_clear       db "clear",0
+  1364 00000C07 7265626F6F7400          cmd_reboot      db "reboot",0
+  1365 00000C0E 6578697400              cmd_exit        db "exit",0
+  1366 00000C13 6B626400                cmd_kbd         db "kbd",0
+  1367 00000C17 696E7374616C6C00        cmd_install     db "install",0
+  1368                                  
+  1369                                  ; CPU messages
+  1370 00000C1F 20204350552056656E-     msg_cpu_vendor  db "  CPU Vendor  : ",0
+  1370 00000C28 646F7220203A2000   
+  1371 00000C30 2020435055204D6F64-     msg_cpu_mode    db "  CPU Mode    : ",0
+  1371 00000C39 65202020203A2000   
+  1372 00000C41 36342D62697420284C-     msg_cpu_64      db "64-bit (Long Mode)",13,10,0
+  1372 00000C4A 6F6E67204D6F646529-
+  1372 00000C53 0D0A00             
+  1373 00000C56 33322D6269740D0A00      msg_cpu_32      db "32-bit",13,10,0
+  1374 00000C5F 416E6369656E742028-     msg_cpu_old     db "Ancient (no CPUID)",13,10,0
+  1374 00000C68 6E6F20435055494429-
+  1374 00000C71 0D0A00             
+  1375 00000C74 202046616D696C7920-     msg_cpu_family  db "  Family      : ",0
+  1375 00000C7D 20202020203A2000   
+  1376 00000C85 20204D6F64656C2020-     msg_cpu_model   db "  Model       : ",0
+  1376 00000C8E 20202020203A2000   
+  1377 00000C96 20205374657070696E-     msg_cpu_stepping db "  Stepping    : ",0
+  1377 00000C9F 67202020203A2000   
+  1378 00000CA7 20204272616E642020-     msg_cpu_brand   db "  Brand       : ",0
+  1378 00000CB0 20202020203A2000   
+  1379                                  
+  1380                                  ; Memory messages
+  1381 00000CB8 0D0A45383230204D65-     msg_mem_header  db 13,10,"E820 Memory Map:",13,10
+  1381 00000CC1 6D6F7279204D61703A-
+  1381 00000CCA 0D0A               
+  1382 00000CCC 426173652020202020-                     db "Base       Length     Type",13,10
+  1382 00000CD5 20204C656E67746820-
+  1382 00000CDE 20202020547970650D-
+  1382 00000CE7 0A                 
+  1383 00000CE8 2D2D2D2D2D2D2D2D2D-                     db "---------- ---------- ----------------",13,10,0
+  1383 00000CF1 2D202D2D2D2D2D2D2D-
+  1383 00000CFA 2D2D2D202D2D2D2D2D-
+  1383 00000D03 2D2D2D2D2D2D2D2D2D-
+  1383 00000D0C 2D2D0D0A00         
+  1384 00000D11 557361626C65205241-     msg_type_usable db "Usable RAM",0
+  1384 00000D1A 4D00               
+  1385 00000D1C 526573657276656400      msg_type_reserved db "Reserved",0
+  1386 00000D25 41435049205265636C-     msg_type_acpi_reclaim db "ACPI Reclaim",0
+  1386 00000D2E 61696D00           
+  1387 00000D32 41435049204E565300      msg_type_acpi_nvs db "ACPI NVS",0
+  1388 00000D3B 556E6B6E6F776E00        msg_type_unknown db "Unknown",0
+  1389 00000D43 4E6F206D656D6F7279-     msg_mem_fail    db "No memory map available.",13,10,0
+  1389 00000D4C 206D61702061766169-
+  1389 00000D55 6C61626C652E0D0A00 
+  1390                                  
+  1391                                  ; Arch messages
+  1392 00000D5E 0D0A506C6174666F72-     msg_arch_summary db 13,10,"Platform Summary:",13,10,0
+  1392 00000D67 6D2053756D6D617279-
+  1392 00000D70 3A0D0A00           
+  1393 00000D74 2020546F74616C2052-     msg_ram_label   db "  Total RAM   : ",0
+  1393 00000D7D 414D2020203A2000   
+  1394 00000D85 204D4200                msg_mb          db " MB",0
+  1395 00000D89 2020426F6F74204472-     msg_boot_drive  db "  Boot Drive  : 0x",0
+  1395 00000D92 69766520203A203078-
+  1395 00000D9B 00                 
+  1396 00000D9C 20204C616E67756167-     msg_arch_lang   db "  Language    : ",0
+  1396 00000DA5 65202020203A2000   
+  1397 00000DAD 20204B6579626F6172-     msg_arch_kbd    db "  Keyboard    : ",0
+  1397 00000DB6 64202020203A2000   
+  1398                                  
+  1399                                  ; Disk messages
+  1400 00000DBE 0D0A4469736B204765-     msg_disk_info   db 13,10,"Disk Geometry (BIOS INT 13h AH=08h):",13,10,0
+  1400 00000DC7 6F6D65747279202842-
+  1400 00000DD0 494F5320494E542031-
+  1400 00000DD9 33682041483D303868-
+  1400 00000DE2 293A0D0A00         
+  1401 00000DE7 202043796C696E6465-     msg_disk_cyl    db "  Cylinders   : ",0
+  1401 00000DF0 72732020203A2000   
+  1402 00000DF8 202048656164732020-     msg_disk_heads  db "  Heads       : ",0
+  1402 00000E01 20202020203A2000   
+  1403 00000E09 2020536563746F7273-     msg_disk_sect   db "  Sectors/Trk : ",0
+  1403 00000E12 2F54726B203A2000   
+  1404 00000E1A 42494F53206469736B-     msg_disk_fail   db "BIOS disk query failed.",13,10,0
+  1404 00000E23 207175657279206661-
+  1404 00000E2C 696C65642E0D0A00   
+  1405                                  
+  1406                                  ; Keyboard messages
+  1407                                  
+  1408                                  ; Reboot / exit messages
+  1409 00000E34 5265626F6F74696E67-     msg_reboot      db "Rebooting...",13,10,0
+  1409 00000E3D 2E2E2E0D0A00       
+  1410 00000E43 5368757474696E6720-     msg_exit        db "Shutting down...",13,10,0
+  1410 00000E4C 646F776E2E2E2E0D0A-
+  1410 00000E55 00                 
+  1411 00000E56 414350492F41504D20-     msg_halt        db "ACPI/APM unavailable. System halted.",13,10,0
+  1411 00000E5F 756E617661696C6162-
+  1411 00000E68 6C652E205379737465-
+  1411 00000E71 6D2068616C7465642E-
+  1411 00000E7A 0D0A00             
+  1412                                  
+  1413                                  ; Language messages
+  1414 00000E7D 55736167653A206C67-     msg_lg_usage    db "Usage: lg <locale> (en-us fr-fr de-de es-es it-it pt-br ru-ru ar-sa zh-cn zh-tw ja-jp ko-kr)",13,10
+  1414 00000E86 203C6C6F63616C653E-
+  1414 00000E8F 2028656E2D75732066-
+  1414 00000E98 722D66722064652D64-
+  1414 00000EA1 652065732D65732069-
+  1414 00000EAA 742D69742070742D62-
+  1414 00000EB3 722072752D72752061-
+  1414 00000EBC 722D7361207A682D63-
+  1414 00000EC5 6E207A682D7477206A-
+  1414 00000ECE 612D6A70206B6F2D6B-
+  1414 00000ED7 72290D0A           
+  1415 00000EDB 4B6579626F61726420-                     db "Keyboard presets are matched to the locale when available.",13,10,0
+  1415 00000EE4 707265736574732061-
+  1415 00000EED 7265206D6174636865-
+  1415 00000EF6 6420746F2074686520-
+  1415 00000EFF 6C6F63616C65207768-
+  1415 00000F08 656E20617661696C61-
+  1415 00000F11 626C652E0D0A00     
+  1416 00000F18 4C616E67756167653A-     msg_lg_set_en   db "Language: English (en-us) — Keyboard: QWERTY",13,10,0
+  1416 00000F21 20456E676C69736820-
+  1416 00000F2A 28656E2D75732920E2-
+  1416 00000F33 8094204B6579626F61-
+  1416 00000F3C 72643A205157455254-
+  1416 00000F45 590D0A00           
+  1417 00000F49 4C616E677565203A20-     msg_lg_set_fr   db "Langue : Francais (fr-fr) — Clavier : AZERTY",13,10,0
+  1417 00000F52 4672616E6361697320-
+  1417 00000F5B 2866722D66722920E2-
+  1417 00000F64 809420436C61766965-
+  1417 00000F6D 72203A20415A455254-
+  1417 00000F76 590D0A00           
+  1418 00000F7A 4C616E67756167653A-     msg_lg_current_old  db "Language: ",0
+  1418 00000F83 2000               
+  1419                                  
+  1420                                  ; Install message
+  1421 00000F85 0D0A                    msg_install     db 13,10
+  1422 00000F87 2B2D2D2D2D2D2D2D2D-                     db "+-----------------------------------------+",13,10
+  1422 00000F90 2D2D2D2D2D2D2D2D2D-
+  1422 00000F99 2D2D2D2D2D2D2D2D2D-
+  1422 00000FA2 2D2D2D2D2D2D2D2D2D-
+  1422 00000FAB 2D2D2D2D2D2D2B0D0A 
+  1423 00000FB4 7C20554E494F532053-                     db "| UNIOS Stage 3 Installation              |",13,10
+  1423 00000FBD 74616765203320496E-
+  1423 00000FC6 7374616C6C6174696F-
+  1423 00000FCF 6E2020202020202020-
+  1423 00000FD8 2020202020207C0D0A 
+  1424 00000FE1 2B2D2D2D2D2D2D2D2D-                     db "+-----------------------------------------+",13,10
+  1424 00000FEA 2D2D2D2D2D2D2D2D2D-
+  1424 00000FF3 2D2D2D2D2D2D2D2D2D-
+  1424 00000FFC 2D2D2D2D2D2D2D2D2D-
+  1424 00001005 2D2D2D2D2D2D2B0D0A 
+  1425 0000100E 537461676520332061-                     db "Stage 3 adds:",13,10
+  1425 00001017 6464733A0D0A       
+  1426 0000101D 20202D2050726F7465-                     db "  - Protected mode (32-bit / 64-bit)",13,10
+  1426 00001026 63746564206D6F6465-
+  1426 0000102F 202833322D62697420-
+  1426 00001038 2F2036342D62697429-
+  1426 00001041 0D0A               
+  1427 00001043 20202D204F53206C61-                     db "  - OS launcher (Windows / Linux / macOS)",13,10
+  1427 0000104C 756E63686572202857-
+  1427 00001055 696E646F7773202F20-
+  1427 0000105E 4C696E7578202F206D-
+  1427 00001067 61634F53290D0A     
+  1428 0000106E 20202D204D756C7469-                     db "  - Multi-machine KVM (keyboard/mouse/audio",13,10
+  1428 00001077 2D6D616368696E6520-
+  1428 00001080 4B564D20286B657962-
+  1428 00001089 6F6172642F6D6F7573-
+  1428 00001092 652F617564696F0D0A 
+  1429 0000109B 202020207368617269-                     db "    sharing across PCs)",13,10
+  1429 000010A4 6E67206163726F7373-
+  1429 000010AD 20504373290D0A     
+  1430 000010B4 20202D204879706572-                     db "  - Hypervisor with virtualisation + emul.",13,10
+  1430 000010BD 7669736F7220776974-
+  1430 000010C6 68207669727475616C-
+  1430 000010CF 69736174696F6E202B-
+  1430 000010D8 20656D756C2E0D0A   
+  1431 000010E0 0D0A                                    db 13,10
+  1432 000010E2 486F7720746F20696E-                     db "How to install (coming in v0.3):",13,10
+  1432 000010EB 7374616C6C2028636F-
+  1432 000010F4 6D696E6720696E2076-
+  1432 000010FD 302E33293A0D0A     
+  1433 00001104 2020312E204F627461-                     db "  1. Obtain unios-stage3.img",13,10
+  1433 0000110D 696E20756E696F732D-
+  1433 00001116 7374616765332E696D-
+  1433 0000111F 670D0A             
+  1434 00001122 202020202028646F77-                     db "     (download or build from source)",13,10
+  1434 0000112B 6E6C6F6164206F7220-
+  1434 00001134 6275696C642066726F-
+  1434 0000113D 6D20736F7572636529-
+  1434 00001146 0D0A               
+  1435 00001148 2020322E2057726974-                     db "  2. Write to a USB drive:",13,10
+  1435 00001151 6520746F2061205553-
+  1435 0000115A 422064726976653A0D-
+  1435 00001163 0A                 
+  1436 00001164 202020202020206464-                     db "       dd if=unios-stage3.img of=/dev/sdX",13,10
+  1436 0000116D 2069663D756E696F73-
+  1436 00001176 2D7374616765332E69-
+  1436 0000117F 6D67206F663D2F6465-
+  1436 00001188 762F7364580D0A     
+  1437 0000118F 2020332E205265626F-                     db "  3. Reboot with USB inserted",13,10
+  1437 00001198 6F7420776974682055-
+  1437 000011A1 534220696E73657274-
+  1437 000011AA 65640D0A           
+  1438 000011AE 2020342E2053656C65-                     db "  4. Select UNIOS from boot menu",13,10
+  1438 000011B7 637420554E494F5320-
+  1438 000011C0 66726F6D20626F6F74-
+  1438 000011C9 206D656E750D0A     
+  1439 000011D0 2020352E2054797065-                     db "  5. Type: install usb",13,10
+  1439 000011D9 3A20696E7374616C6C-
+  1439 000011E2 207573620D0A       
+  1440 000011E8 0D0A                                    db 13,10
+  1441 000011EA 5B4E6F742079657420-                     db "[Not yet implemented - target: UNIOS v0.3]",13,10
+  1441 000011F3 696D706C656D656E74-
+  1441 000011FC 6564202D2074617267-
+  1441 00001205 65743A20554E494F53-
+  1441 0000120E 2076302E335D0D0A   
+  1442 00001216 0D0A00                                  db 13,10,0
+  1443                                  
+  1444                                  ; Shared locale / keyboard strings
+  1445 00001219 656E2D757300            str_en_us       db "en-us",0
+  1446 0000121F 66722D667200            str_fr_fr       db "fr-fr",0
+  1447 00001225 64652D646500            str_de_de       db "de-de",0
+  1448 0000122B 65732D657300            str_es_es       db "es-es",0
+  1449 00001231 69742D697400            str_it_it       db "it-it",0
+  1450 00001237 70742D627200            str_pt_br       db "pt-br",0
+  1451 0000123D 72752D727500            str_ru_ru       db "ru-ru",0
+  1452 00001243 61722D736100            str_ar_sa       db "ar-sa",0
+  1453 00001249 7A682D636E00            str_zh_cn       db "zh-cn",0
+  1454 0000124F 7A682D747700            str_zh_tw       db "zh-tw",0
+  1455 00001255 6A612D6A7000            str_ja_jp       db "ja-jp",0
+  1456 0000125B 6B6F2D6B7200            str_ko_kr       db "ko-kr",0
+  1457                                  
+  1458 00001261 456E676C6973682028-     disp_en_us      db "English (en-us)",0
+  1458 0000126A 656E2D75732900     
+  1459 00001271 4672656E6368202866-     disp_fr_fr      db "French (fr-fr)",0
+  1459 0000127A 722D66722900       
+  1460 00001280 4765726D616E202864-     disp_de_de      db "German (de-de)",0
+  1460 00001289 652D64652900       
+  1461 0000128F 5370616E6973682028-     disp_es_es      db "Spanish (es-es)",0
+  1461 00001298 65732D65732900     
+  1462 0000129F 4974616C69616E2028-     disp_it_it      db "Italian (it-it)",0
+  1462 000012A8 69742D69742900     
+  1463 000012AF 506F72747567756573-     disp_pt_br      db "Portuguese (pt-br)",0
+  1463 000012B8 65202870742D627229-
+  1463 000012C1 00                 
+  1464 000012C2 5275737369616E2028-     disp_ru_ru      db "Russian (ru-ru)",0
+  1464 000012CB 72752D72752900     
+  1465 000012D2 417261626963202861-     disp_ar_sa      db "Arabic (ar-sa)",0
+  1465 000012DB 722D73612900       
+  1466 000012E1 4368696E6573652053-     disp_zh_cn      db "Chinese Simplified (zh-cn)",0
+  1466 000012EA 696D706C6966696564-
+  1466 000012F3 20287A682D636E2900 
+  1467 000012FC 4368696E6573652054-     disp_zh_tw      db "Chinese Traditional (zh-tw)",0
+  1467 00001305 7261646974696F6E61-
+  1467 0000130E 6C20287A682D747729-
+  1467 00001317 00                 
+  1468 00001318 4A6170616E65736520-     disp_ja_jp      db "Japanese (ja-jp)",0
+  1468 00001321 286A612D6A702900   
+  1469 00001329 4B6F7265616E20286B-     disp_ko_kr      db "Korean (ko-kr)",0
+  1469 00001332 6F2D6B722900       
+  1470                                  
+  1471 00001338 555320515745525459-     kbd_disp_qwerty  db "US QWERTY",0
+  1471 00001341 00                 
+  1472 00001342 4672656E636820415A-     kbd_disp_azerty  db "French AZERTY",0
+  1472 0000134B 4552545900         
+  1473 00001350 4765726D616E205157-     kbd_disp_qwertz  db "German QWERTZ",0
+  1473 00001359 4552545A00         
+  1474 0000135E 5370616E6973682028-     kbd_disp_es_es   db "Spanish (Latin fallback)",0
+  1474 00001367 4C6174696E2066616C-
+  1474 00001370 6C6261636B2900     
+  1475 00001377 4974616C69616E2028-     kbd_disp_it_it   db "Italian (Latin fallback)",0
+  1475 00001380 4C6174696E2066616C-
+  1475 00001389 6C6261636B2900     
+  1476 00001390 4272617A696C69616E-     kbd_disp_pt_br   db "Brazilian ABNT2 (Latin fallback)",0
+  1476 00001399 2041424E543220284C-
+  1476 000013A2 6174696E2066616C6C-
+  1476 000013AB 6261636B2900       
+  1477 000013B1 5275737369616E2028-     kbd_disp_ru_ru   db "Russian (Latin fallback)",0
+  1477 000013BA 4C6174696E2066616C-
+  1477 000013C3 6C6261636B2900     
+  1478 000013CA 41726162696320284C-     kbd_disp_ar_sa   db "Arabic (Latin fallback)",0
+  1478 000013D3 6174696E2066616C6C-
+  1478 000013DC 6261636B2900       
+  1479 000013E2 4368696E6573652053-     kbd_disp_zh_cn   db "Chinese Simplified (Pinyin fallback)",0
+  1479 000013EB 696D706C6966696564-
+  1479 000013F4 202850696E79696E20-
+  1479 000013FD 66616C6C6261636B29-
+  1479 00001406 00                 
+  1480 00001407 4368696E6573652054-     kbd_disp_zh_tw   db "Chinese Traditional (Zhuyin fallback)",0
+  1480 00001410 7261646974696F6E61-
+  1480 00001419 6C20285A687579696E-
+  1480 00001422 2066616C6C6261636B-
+  1480 0000142B 2900               
+  1481 0000142D 4A6170616E65736520-     kbd_disp_ja_jp   db "Japanese (Romaji fallback)",0
+  1481 00001436 28526F6D616A692066-
+  1481 0000143F 616C6C6261636B2900 
+  1482 00001448 4B6F7265616E202852-     kbd_disp_ko_kr   db "Korean (Romanized fallback)",0
+  1482 00001451 6F6D616E697A656420-
+  1482 0000145A 66616C6C6261636B29-
+  1482 00001463 00                 
+  1483                                  
+  1484 00001464 4B6579626F6172643A-     msg_kbd_set      db "Keyboard: ",0
+  1484 0000146D 2000               
+  1485 0000146F 4C616E67756167653A-     msg_lg_set       db "Language: ",0
+  1485 00001478 2000               
+  1486 0000147A 43757272656E74206C-     msg_lg_current   db "Current locale: ",0
+  1486 00001483 6F63616C653A2000   
+  1487 0000148B 207C204B6579626F61-     msg_lg_sep       db " | Keyboard: ",0
+  1487 00001494 72643A2000         
+  1488                                  
+  1489 00001499 00                      lang_id         db 0
+  1490 0000149A 00                      kbd_layout      db 0
+  1491                                  
+  1492                                  ; History ring-buffer state (all zero-initialised in BSS, set at _start)
+  1493 0000149B 0000                    hist_head       dw 0
+  1494 0000149D 0000                    hist_count      dw 0
+  1495 0000149F FFFF                    hist_cur        dw 0xFFFF
+  1496 000014A1 00                      rl_start_row    db 0
+  1497 000014A2 00                      rl_start_col    db 0
+  1498 000014A3 0000                    rl_prev_len     dw 0
+  1499 000014A5 0000                    rl_max          dw 0
+  1500                                  
+  1501                                  ; =============================================================================
+  1502                                  ; Locale and keyboard mapping tables
+  1503                                  ; =============================================================================
+  1504 000014A7 [6112][7112][8012]-     lang_display_table dw disp_en_us, disp_fr_fr, disp_de_de, disp_es_es, disp_it_it, disp_pt_br, disp_ru_ru, disp_ar_sa, disp_zh_cn, disp_zh_tw, disp_ja_jp, disp_ko_kr
+  1504 000014AD [8F12][9F12][AF12]-
+  1504 000014B3 [C212][D212][E112]-
+  1504 000014B9 [FC12][1813][2913] 
+  1505 000014BF [3813][4213][5013]-     kbd_display_table  dw kbd_disp_qwerty, kbd_disp_azerty, kbd_disp_qwertz, kbd_disp_es_es, kbd_disp_it_it, kbd_disp_pt_br, kbd_disp_ru_ru, kbd_disp_ar_sa, kbd_disp_zh_cn, kbd_disp_zh_tw, kbd_disp_ja_jp, kbd_disp_ko_kr
+  1505 000014C5 [5E13][7713][9013]-
+  1505 000014CB [B113][CA13][E213]-
+  1505 000014D1 [0714][2D14][4814] 
+  1506 000014D7 [1912][1F12][2512]-     locale_code_table  dw str_en_us, str_fr_fr, str_de_de, str_es_es, str_it_it, str_pt_br, str_ru_ru, str_ar_sa, str_zh_cn, str_zh_tw, str_ja_jp, str_ko_kr
+  1506 000014DD [2B12][3112][3712]-
+  1506 000014E3 [3D12][4312][4912]-
+  1506 000014E9 [4F12][5512][5B12] 
+  1507 000014EF 000102030405060708-     locale_default_kbd db 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+  1507 000014F8 090A0B             
+  1508 000014FB [1315][7015][CD15]-     kbd_map_table     dw qwerty_chars, azerty_chars, qwertz_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars
+  1508 00001501 [1315][1315][1315]-
+  1508 00001507 [1315][1315][1315]-
+  1508 0000150D [1315][1315][1315] 
+  1509                                  
+  1510                                  ; =============================================================================
+  1511                                  ; Keyboard layout mapping tables
+  1512                                  ; =============================================================================
+  1513                                  ; Parallel arrays: qwerty_chars[i] maps to the active layout table at index i
+  1514                                  ; Additional layouts can reuse qwerty_chars as Latin fallbacks in Stage 2
+  1515                                  
+  1516 00001513 313233343536373839-     qwerty_chars    db "1234567890-=qwertyuiop[]asdfghjkl;'`zxcvbnm,./"
+  1516 0000151C 302D3D717765727479-
+  1516 00001525 75696F705B5D617364-
+  1516 0000152E 6667686A6B6C3B2760-
+  1516 00001537 7A786376626E6D2C2E-
+  1516 00001540 2F                 
+  1517 00001541 21402324255E262A28-                     db "!@#$%^&*()_+QWERTYUIOP{}ASDFGHJKL:", 0x22, "~ZXCVBNM<>?",0
+  1517 0000154A 295F2B515745525459-
+  1517 00001553 55494F507B7D415344-
+  1517 0000155C 4647484A4B4C3A227E-
+  1517 00001565 5A584356424E4D3C3E-
+  1517 0000156E 3F00               
+  1518                                  
+  1519 00001570 26E92227282DE85FE7-     azerty_chars    db "&", 0xE9, 0x22, 0x27, "(-", 0xE8, "_", 0xE7, 0xE0, ")=azertyuiop^$qsdfghjklm", 0xF9, 0xB2, "wxcvbn,;:!"
+  1519 00001579 E0293D617A65727479-
+  1519 00001582 75696F705E24717364-
+  1519 0000158B 6667686A6B6C6DF9B2-
+  1519 00001594 77786376626E2C3B3A-
+  1519 0000159D 21                 
+  1520 0000159E 313233343536373839-                     db "1234567890", 0xB0, "+AZERTYUIOP", 0xA8, "$QSDFGHJKLM%", 0xA3, "WXCVBN?./", 0xA7, 0
+  1520 000015A7 30B02B415A45525459-
+  1520 000015B0 55494F50A824515344-
+  1520 000015B9 4647484A4B4C4D25A3-
+  1520 000015C2 57584356424E3F2E2F-
+  1520 000015CB A700               
+  1521                                  
+  1522 000015CD 313233343536373839-     qwertz_chars    db "1234567890-=qwertzuiop[]asdfghjkl;'`yxcvbnm,./"
+  1522 000015D6 302D3D71776572747A-
+  1522 000015DF 75696F705B5D617364-
+  1522 000015E8 6667686A6B6C3B2760-
+  1522 000015F1 79786376626E6D2C2E-
+  1522 000015FA 2F                 
+  1523 000015FB 21402324255E262A28-                     db "!@#$%^&*()_+QWERTZUIOP{}ASDFGHJKL:", 0x22, "~YXCVBNM<>?",0
+  1523 00001604 295F2B51574552545A-
+  1523 0000160D 55494F507B7D415344-
+  1523 00001616 4647484A4B4C3A227E-
+  1523 0000161F 59584356424E4D3C3E-
+  1523 00001628 3F00               
+  1524                                  
+  1525                                  ; =============================================================================
+  1526                                  ; Zero-pad to exactly 28672 bytes (56 sectors x 512)
+  1527                                  ; =============================================================================
+  1528 0000162A 00<rep 59D6h>           times (28672 - ($ - $$)) db 0

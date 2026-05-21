@@ -1,0 +1,168 @@
+     1                                  ; =============================================================================
+     2                                  ; UNIOS - STAGE 0 : Pre-Bootloader (MBR)                         v0.2
+     3                                  ; =============================================================================
+     4                                  ; Loaded by BIOS at 0x7C00. Must fit in exactly 512 bytes.
+     5                                  ; Shared Info Block @ 0x0500 :
+     6                                  ;   +0x00 [12B] CPU Vendor   +0x0C [1B] 64-bit flag   +0x0D [1B] Boot drive
+     7                                  ;   +0x0E [2B]  RAM (MB)     +0x10 [1B] Language       +0x11 [1B] KBD layout
+     8                                  ; =============================================================================
+     9                                  
+    10                                  [BITS 16]
+    11                                  [ORG 0x7C00]
+    12                                  
+    13                                  STAGE1_ADDR  equ 0x7E00
+    14                                  STAGE1_LBA   equ 1
+    15                                  STAGE1_NSECT equ 8
+    16                                  INFO_BLOCK   equ 0x0500
+    17                                  
+    18                                  _start:
+    19 00000000 FA                          cli
+    20 00000001 31C0                        xor  ax, ax
+    21 00000003 8ED8                        mov  ds, ax
+    22 00000005 8EC0                        mov  es, ax
+    23 00000007 8ED0                        mov  ss, ax
+    24 00000009 BC007C                      mov  sp, 0x7C00
+    25 0000000C FB                          sti
+    26                                  
+    27 0000000D 88160D05                    mov  [INFO_BLOCK + 0x0D], dl   ; boot drive
+    28                                  
+    29 00000011 B80300                      mov  ax, 0x0003                ; 80x25 text mode
+    30 00000014 CD10                        int  0x10
+    31                                  
+    32 00000016 BE[2D01]                    mov  si, msg_banner
+    33 00000019 E80301                      call puts
+    34                                  
+    35 0000001C E80800                      call cpu_detect
+    36 0000001F E8AD00                      call load_stage1
+    37                                  
+    38 00000022 EA007E0000                  jmp  0x0000:STAGE1_ADDR
+    39                                  
+    40                                  ; =============================================================================
+    41                                  ; cpu_detect — CPUID vendor string + Long Mode flag → INFO_BLOCK
+    42                                  ; =============================================================================
+    43                                  cpu_detect:
+    44 00000027 669C                        pushfd
+    45 00000029 6658                        pop  eax
+    46 0000002B 6689C1                      mov  ecx, eax
+    47 0000002E 663500002000                xor  eax, (1 << 21)
+    48 00000034 6650                        push eax
+    49 00000036 669D                        popfd
+    50 00000038 669C                        pushfd
+    51 0000003A 6658                        pop  eax
+    52 0000003C 6651                        push ecx
+    53 0000003E 669D                        popfd
+    54 00000040 6631C8                      xor  eax, ecx
+    55 00000043 7467                        jz   .ancient
+    56                                  
+    57 00000045 66B800000000                mov  eax, 0
+    58 0000004B 0FA2                        cpuid
+    59 0000004D 66891E0005                  mov  [INFO_BLOCK + 0], ebx
+    60 00000052 6689160405                  mov  [INFO_BLOCK + 4], edx
+    61 00000057 66890E0805                  mov  [INFO_BLOCK + 8], ecx
+    62 0000005C C6060C0500                  mov  byte [INFO_BLOCK + 12], 0
+    63                                  
+    64 00000061 BE[3F01]                    mov  si, msg_cpu
+    65 00000064 E8B800                      call puts
+    66 00000067 BE0005                      mov  si, INFO_BLOCK
+    67 0000006A E8B200                      call puts
+    68 0000006D BE[4501]                    mov  si, msg_crlf
+    69 00000070 E8AC00                      call puts
+    70                                  
+    71 00000073 66B800000080                mov  eax, 0x80000000
+    72 00000079 0FA2                        cpuid
+    73 0000007B 663D01000080                cmp  eax, 0x80000001
+    74 00000081 721D                        jb   .no_lm
+    75                                  
+    76 00000083 66B801000080                mov  eax, 0x80000001
+    77 00000089 0FA2                        cpuid
+    78 0000008B 66F7C200000020              test edx, (1 << 29)
+    79 00000092 740C                        jz   .no_lm
+    80                                  
+    81 00000094 C6060C0501                  mov  byte [INFO_BLOCK + 0x0C], 1
+    82 00000099 BE[4801]                    mov  si, msg_64
+    83 0000009C E88000                      call puts
+    84 0000009F C3                          ret
+    85                                  
+    86                                  .no_lm:
+    87 000000A0 C6060C0500                  mov  byte [INFO_BLOCK + 0x0C], 0
+    88 000000A5 BE[5301]                    mov  si, msg_32
+    89 000000A8 E87400                      call puts
+    90 000000AB C3                          ret
+    91                                  
+    92                                  .ancient:
+    93 000000AC C6060C05FF                  mov  byte [INFO_BLOCK + 0x0C], 0xFF
+    94 000000B1 66C7060005556E6B6E          mov  dword [INFO_BLOCK + 0], 0x6E6B6E55   ; "Unkn"
+    95 000000BA 66C70604056F776E00          mov  dword [INFO_BLOCK + 4], 0x006E776F   ; "own\0"
+    96 000000C3 C606080500                  mov  byte  [INFO_BLOCK + 8], 0
+    97 000000C8 BE[5E01]                    mov  si, msg_old
+    98 000000CB E85100                      call puts
+    99 000000CE C3                          ret
+   100                                  
+   101                                  ; =============================================================================
+   102                                  ; load_stage1 — INT 13h AH=42h (LBA extended)
+   103                                  ; =============================================================================
+   104                                  load_stage1:
+   105 000000CF BE[6601]                    mov  si, msg_load
+   106 000000D2 E84A00                      call puts
+   107                                  
+   108 000000D5 C606[7701]10                mov  byte  [dap + 0], 0x10
+   109 000000DA C606[7801]00                mov  byte  [dap + 1], 0x00
+   110 000000DF C706[7901]0800              mov  word  [dap + 2], STAGE1_NSECT
+   111 000000E5 C706[7B01]007E              mov  word  [dap + 4], STAGE1_ADDR
+   112 000000EB C706[7D01]0000              mov  word  [dap + 6], 0x0000
+   113 000000F1 66C706[7F01]010000-         mov  dword [dap + 8], STAGE1_LBA
+   113 000000F9 00                 
+   114 000000FA 66C706[8301]000000-         mov  dword [dap +12], 0
+   114 00000102 00                 
+   115                                  
+   116 00000103 B442                        mov  ah, 0x42
+   117 00000105 8A160D05                    mov  dl, [INFO_BLOCK + 0x0D]
+   118 00000109 BE[7701]                    mov  si, dap
+   119 0000010C CD13                        int  0x13
+   120 0000010E 7207                        jc   .fail
+   121                                  
+   122 00000110 BE[6C01]                    mov  si, msg_ok
+   123 00000113 E80900                      call puts
+   124 00000116 C3                          ret
+   125                                  
+   126                                  .fail:
+   127 00000117 BE[7101]                    mov  si, msg_err
+   128 0000011A E80200                      call puts
+   129 0000011D FA                          cli
+   130 0000011E F4                          hlt
+   131                                  
+   132                                  ; =============================================================================
+   133                                  ; puts — display null-terminated string pointed by SI
+   134                                  ; =============================================================================
+   135                                  puts:
+   136 0000011F AC                          lodsb
+   137 00000120 08C0                        or   al, al
+   138 00000122 7408                        jz   .done
+   139 00000124 B40E                        mov  ah, 0x0E
+   140 00000126 31DB                        xor  bx, bx
+   141 00000128 CD10                        int  0x10
+   142 0000012A EBF3                        jmp  puts
+   143                                  .done:
+   144 0000012C C3                          ret
+   145                                  
+   146                                  ; =============================================================================
+   147                                  ; Data (compact to fit in 512 bytes)
+   148                                  ; =============================================================================
+   149 0000012D 5B53305D20554E494F-     msg_banner  db "[S0] UNIOS v0.2",13,10,0
+   149 00000136 532076302E320D0A00 
+   150 0000013F 4350553A2000            msg_cpu     db "CPU: ",0
+   151 00000145 0D0A00                  msg_crlf    db 13,10,0
+   152 00000148 5B36342D6269745D0D-     msg_64      db "[64-bit]",13,10,0
+   152 00000151 0A00               
+   153 00000153 5B33322D6269745D0D-     msg_32      db "[32-bit]",13,10,0
+   153 0000015C 0A00               
+   154 0000015E 5B4F4C445D0D0A00        msg_old     db "[OLD]",13,10,0
+   155 00000166 53312E2E2E00            msg_load    db "S1...",0
+   156 0000016C 4F4B0D0A00              msg_ok      db "OK",13,10,0
+   157 00000171 4552520D0A00            msg_err     db "ERR",13,10,0
+   158                                  
+   159 00000177 00<rep 10h>             dap         times 16 db 0
+   160                                  
+   161                                  ; ── Padding + signature ───────────────────────────────────────────────────────
+   162 00000187 00<rep 77h>             times 510-($-$$) db 0
+   163 000001FE 55AA                    dw 0xAA55

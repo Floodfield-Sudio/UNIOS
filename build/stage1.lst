@@ -1,0 +1,314 @@
+     1                                  ; =============================================================================
+     2                                  ; UNIOS - STAGE 1 : Boot Menu, RAM Detection & Stage 2 Loader    v0.2
+     3                                  ; =============================================================================
+     4                                  ; Loaded at 0x7E00 by Stage 0.
+     5                                  ; Responsibilities:
+     6                                  ;   1. Init persistent settings in INFO_BLOCK (+0x10 language, +0x11 kbd)
+     7                                  ;   2. Show boot menu: [1] UNIOS  [2] Original OS
+     8                                  ;   3. E820 memory map → store at 0x2000
+     9                                  ;   4. Calculate total usable RAM in MB → INFO_BLOCK +0x0E
+    10                                  ;   5. Load Stage 2 from disk (sectors 9-64) to 0x9000
+    11                                  ;   6. Jump to Stage 2
+    12                                  ;
+    13                                  ; INFO_BLOCK layout (@ 0x0500):
+    14                                  ;   +0x00 [12B]  CPU vendor string
+    15                                  ;   +0x0C [1B]   64-bit flag  (set by Stage 0)
+    16                                  ;   +0x0D [1B]   Boot drive   (set by Stage 0)
+    17                                  ;   +0x0E [2B]   RAM total MB (set here)
+    18                                  ;   +0x10 [1B]   Language: 0=en-us  1=fr-fr
+    19                                  ;   +0x11 [1B]   KBD layout: 0=QWERTY  1=AZERTY
+    20                                  ; =============================================================================
+    21                                  
+    22                                  [BITS 16]
+    23                                  [ORG 0x7E00]
+    24                                  
+    25                                  STAGE2_ADDR  equ 0x9000
+    26                                  STAGE2_LBA   equ 9
+    27                                  STAGE2_NSECT equ 56
+    28                                  INFO_BLOCK   equ 0x0500
+    29                                  E820_MAP     equ 0x2000
+    30                                  
+    31                                  _start:
+    32 00000000 B80300                      mov  ax, 0x0003
+    33 00000003 CD10                        int  0x10
+    34                                  
+    35                                      ; Initialise persistent settings to defaults
+    36 00000005 C606100500                  mov  byte [INFO_BLOCK + 0x10], 0   ; language  = en-us
+    37 0000000A C606110500                  mov  byte [INFO_BLOCK + 0x11], 0   ; kbd layout = QWERTY
+    38                                  
+    39 0000000F BE[9D01]                    mov  si, msg_banner
+    40 00000012 E85701                      call puts
+    41                                  
+    42 00000015 E87D00                      call detect_ram
+    43 00000018 E80800                      call show_boot_menu     ; may jump away or return normally for UNIOS path
+    44 0000001B E8FE00                      call load_stage2
+    45                                  
+    46 0000001E EA00900000                  jmp  0x0000:STAGE2_ADDR
+    47                                  
+    48                                  ; =============================================================================
+    49                                  ; show_boot_menu — Display menu, wait for key, act on choice
+    50                                  ; =============================================================================
+    51                                  show_boot_menu:
+    52 00000023 BE[1802]                    mov  si, msg_menu
+    53 00000026 E84301                      call puts
+    54                                  
+    55                                  .wait:
+    56 00000029 30E4                        xor  ah, ah
+    57 0000002B CD16                        int  0x16               ; AH=scancode, AL=ASCII
+    58                                  
+    59 0000002D 3C31                        cmp  al, '1'
+    60 0000002F 7406                        je   .unios
+    61 00000031 3C32                        cmp  al, '2'
+    62 00000033 7409                        je   .original
+    63 00000035 EBF2                        jmp  .wait
+    64                                  
+    65                                  .unios:
+    66 00000037 BE[B902]                    mov  si, msg_menu_s2
+    67 0000003A E82F01                      call puts
+    68 0000003D C3                          ret                     ; return → load_stage2 → Stage 2
+    69                                  
+    70                                  .original:
+    71 0000003E BE[BD02]                    mov  si, msg_menu_orig
+    72 00000041 E82801                      call puts
+    73                                  
+    74                                      ; Attempt to chainload first sector of drive 0x81 (second HDD)
+    75                                      ; If that fails, boot from BIOS bootstrap (INT 19h)
+    76 00000044 C606[3103]10                mov  byte  [dap2 + 0], 0x10
+    77 00000049 C606[3203]00                mov  byte  [dap2 + 1], 0x00
+    78 0000004E C706[3303]0100              mov  word  [dap2 + 2], 1          ; 1 sector
+    79 00000054 C706[3503]007C              mov  word  [dap2 + 4], 0x7C00    ; load to standard MBR address
+    80 0000005A C706[3703]0000              mov  word  [dap2 + 6], 0x0000
+    81 00000060 66C706[3903]000000-         mov  dword [dap2 + 8], 0          ; LBA 0
+    81 00000068 00                 
+    82 00000069 66C706[3D03]000000-         mov  dword [dap2 +12], 0
+    82 00000071 00                 
+    83                                  
+    84 00000072 B442                        mov  ah, 0x42
+    85 00000074 B281                        mov  dl, 0x81                     ; second hard drive
+    86 00000076 BE[3103]                    mov  si, dap2
+    87 00000079 CD13                        int  0x13
+    88 0000007B 720F                        jc   .try_int19
+    89                                  
+    90                                      ; Verify boot signature
+    91 0000007D 813EFE7D55AA                cmp  word [0x7DFE], 0xAA55
+    92 00000083 7507                        jne  .try_int19
+    93                                  
+    94                                      ; Found bootable sector: jump to it
+    95 00000085 B281                        mov  dl, 0x81
+    96 00000087 EA007C0000                  jmp  0x0000:0x7C00
+    97                                  
+    98                                  .try_int19:
+    99                                      ; BIOS bootstrap: re-reads boot sector from first bootable device
+   100                                      ; (may reload UNIOS if it's the only boot drive)
+   101 0000008C CD19                        int  0x19
+   102                                  
+   103                                      ; If INT 19 returns, fall back to UNIOS Stage 2
+   104 0000008E BE[E402]                    mov  si, msg_menu_fallback
+   105 00000091 E8D800                      call puts
+   106 00000094 C3                          ret
+   107                                  
+   108                                  ; =============================================================================
+   109                                  ; detect_ram — INT 15h E820 memory map
+   110                                  ; =============================================================================
+   111                                  detect_ram:
+   112 00000095 BE[BB01]                    mov  si, msg_ram_detect
+   113 00000098 E8D100                      call puts
+   114                                  
+   115 0000009B 6631DB                      xor  ebx, ebx
+   116 0000009E BF0020                      mov  di, E820_MAP
+   117 000000A1 31C9                        xor  cx, cx
+   118                                  
+   119                                  .loop:
+   120 000000A3 66B820E80000                mov  eax, 0xE820
+   121 000000A9 66BA50414D53                mov  edx, 0x534D4150
+   122 000000AF 66B918000000                mov  ecx, 24
+   123 000000B5 CD15                        int  0x15
+   124 000000B7 720B                        jc   .done
+   125                                  
+   126 000000B9 83C718                      add  di, 24
+   127 000000BC 41                          inc  cx
+   128 000000BD 6685DB                      test ebx, ebx
+   129 000000C0 7402                        jz   .done
+   130 000000C2 EBDF                        jmp  .loop
+   131                                  
+   132                                  .done:
+   133 000000C4 890EFE1F                    mov  [E820_MAP - 2], cx
+   134 000000C8 E80100                      call calc_total_ram
+   135 000000CB C3                          ret
+   136                                  
+   137                                  ; =============================================================================
+   138                                  ; calc_total_ram — Sum Type=1 regions, store in INFO_BLOCK +0x0E (MB)
+   139                                  ; =============================================================================
+   140                                  calc_total_ram:
+   141 000000CC 660FB70EFE1F                movzx ecx, word [E820_MAP - 2]
+   142 000000D2 6685C9                      test  ecx, ecx
+   143 000000D5 7438                        jz    .no_ram
+   144                                  
+   145 000000D7 6631C0                      xor   eax, eax
+   146 000000DA BE0020                      mov   si, E820_MAP
+   147                                  
+   148                                  .sum_loop:
+   149 000000DD 66837C1001                  cmp   dword [si + 16], 1
+   150 000000E2 7507                        jne   .skip
+   151 000000E4 668B5C08                    mov   ebx, [si + 8]
+   152 000000E8 6601D8                      add   eax, ebx
+   153                                  .skip:
+   154 000000EB 83C618                      add   si, 24
+   155 000000EE E2ED                        loop  .sum_loop
+   156                                  
+   157 000000F0 66BB00001000                mov   ebx, 1048576
+   158 000000F6 6631D2                      xor   edx, edx
+   159 000000F9 66F7F3                      div   ebx
+   160 000000FC A30E05                      mov   [INFO_BLOCK + 0x0E], ax
+   161                                  
+   162 000000FF BE[CE01]                    mov   si, msg_ram_total
+   163 00000102 E86700                      call  puts
+   164 00000105 E87200                      call  print_dec
+   165 00000108 BE[D401]                    mov   si, msg_mb
+   166 0000010B E85E00                      call  puts
+   167 0000010E C3                          ret
+   168                                  
+   169                                  .no_ram:
+   170 0000010F C7060E050000                mov   word [INFO_BLOCK + 0x0E], 0
+   171 00000115 BE[DA01]                    mov   si, msg_ram_fail
+   172 00000118 E85100                      call  puts
+   173 0000011B C3                          ret
+   174                                  
+   175                                  ; =============================================================================
+   176                                  ; load_stage2 — INT 13h AH=42h (LBA)
+   177                                  ; =============================================================================
+   178                                  load_stage2:
+   179 0000011C BE[F101]                    mov  si, msg_load_s2
+   180 0000011F E84A00                      call puts
+   181                                  
+   182 00000122 C606[2103]10                mov  byte  [dap + 0], 0x10
+   183 00000127 C606[2203]00                mov  byte  [dap + 1], 0x00
+   184 0000012C C706[2303]3800              mov  word  [dap + 2], STAGE2_NSECT
+   185 00000132 C706[2503]0090              mov  word  [dap + 4], STAGE2_ADDR
+   186 00000138 C706[2703]0000              mov  word  [dap + 6], 0x0000
+   187 0000013E 66C706[2903]090000-         mov  dword [dap + 8], STAGE2_LBA
+   187 00000146 00                 
+   188 00000147 66C706[2D03]000000-         mov  dword [dap +12], 0
+   188 0000014F 00                 
+   189                                  
+   190 00000150 B442                        mov  ah, 0x42
+   191 00000152 8A160D05                    mov  dl, [INFO_BLOCK + 0x0D]
+   192 00000156 BE[2103]                    mov  si, dap
+   193 00000159 CD13                        int  0x13
+   194 0000015B 7207                        jc   .fail
+   195                                  
+   196 0000015D BE[0402]                    mov  si, msg_ok
+   197 00000160 E80900                      call puts
+   198 00000163 C3                          ret
+   199                                  
+   200                                  .fail:
+   201 00000164 BE[0B02]                    mov  si, msg_err
+   202 00000167 E80200                      call puts
+   203 0000016A FA                          cli
+   204 0000016B F4                          hlt
+   205                                  
+   206                                  ; =============================================================================
+   207                                  ; Utilities
+   208                                  ; =============================================================================
+   209                                  puts:
+   210 0000016C AC                          lodsb
+   211 0000016D 08C0                        or   al, al
+   212 0000016F 7408                        jz   .done
+   213 00000171 B40E                        mov  ah, 0x0E
+   214 00000173 31DB                        xor  bx, bx
+   215 00000175 CD10                        int  0x10
+   216 00000177 EBF3                        jmp  puts
+   217                                  .done:
+   218 00000179 C3                          ret
+   219                                  
+   220                                  print_dec:
+   221 0000017A 50                          push ax
+   222 0000017B 53                          push bx
+   223 0000017C 51                          push cx
+   224 0000017D 52                          push dx
+   225                                  
+   226 0000017E BB0A00                      mov  bx, 10
+   227 00000181 31C9                        xor  cx, cx
+   228                                  
+   229                                  .push_loop:
+   230 00000183 31D2                        xor  dx, dx
+   231 00000185 F7F3                        div  bx
+   232 00000187 52                          push dx
+   233 00000188 41                          inc  cx
+   234 00000189 85C0                        test ax, ax
+   235 0000018B 75F6                        jnz  .push_loop
+   236                                  
+   237                                  .pop_loop:
+   238 0000018D 58                          pop  ax
+   239 0000018E 0430                        add  al, '0'
+   240 00000190 B40E                        mov  ah, 0x0E
+   241 00000192 31DB                        xor  bx, bx
+   242 00000194 CD10                        int  0x10
+   243 00000196 E2F5                        loop .pop_loop
+   244                                  
+   245 00000198 5A                          pop  dx
+   246 00000199 59                          pop  cx
+   247 0000019A 5B                          pop  bx
+   248 0000019B 58                          pop  ax
+   249 0000019C C3                          ret
+   250                                  
+   251                                  ; =============================================================================
+   252                                  ; Data
+   253                                  ; =============================================================================
+   254 0000019D 0D0A5B53315D20554E-     msg_banner      db 13,10,"[S1] UNIOS - Stage 1 v0.2",13,10,0
+   254 000001A6 494F53202D20537461-
+   254 000001AF 676520312076302E32-
+   254 000001B8 0D0A00             
+   255 000001BB 446574656374696E67-     msg_ram_detect  db "Detecting RAM...",13,10,0
+   255 000001C4 2052414D2E2E2E0D0A-
+   255 000001CD 00                 
+   256 000001CE 52414D3A2000            msg_ram_total   db "RAM: ",0
+   257 000001D4 204D420D0A00            msg_mb          db " MB",13,10,0
+   258 000001DA 52414D206465746563-     msg_ram_fail    db "RAM detection failed",13,10,0
+   258 000001E3 74696F6E206661696C-
+   258 000001EC 65640D0A00         
+   259 000001F1 4C6F6164696E672053-     msg_load_s2     db "Loading Stage 2...",0
+   259 000001FA 7461676520322E2E2E-
+   259 00000203 00                 
+   260 00000204 4F4B0D0A0D0A00          msg_ok          db "OK",13,10,13,10,0
+   261 0000020B 4449534B204552524F-     msg_err         db "DISK ERROR",13,10,0
+   261 00000214 520D0A00           
+   262                                  
+   263 00000218 0D0A                    msg_menu        db 13,10
+   264 0000021A 3D3D3D3D3D3D3D3D3D-                     db "============ UNIOS Boot Menu ============",13,10
+   264 00000223 3D3D3D20554E494F53-
+   264 0000022C 20426F6F74204D656E-
+   264 00000235 75203D3D3D3D3D3D3D-
+   264 0000023E 3D3D3D3D3D0D0A     
+   265 00000245 20205B315D20554E49-                     db "  [1] UNIOS Diagnostic Shell (Stage 2)",13,10
+   265 0000024E 4F5320446961676E6F-
+   265 00000257 73746963205368656C-
+   265 00000260 6C2028537461676520-
+   265 00000269 32290D0A           
+   266 0000026D 20205B325D20426F6F-                     db "  [2] Boot original OS",13,10
+   266 00000276 74206F726967696E61-
+   266 0000027F 6C204F530D0A       
+   267 00000285 3D3D3D3D3D3D3D3D3D-                     db "=========================================",13,10
+   267 0000028E 3D3D3D3D3D3D3D3D3D-
+   267 00000297 3D3D3D3D3D3D3D3D3D-
+   267 000002A0 3D3D3D3D3D3D3D3D3D-
+   267 000002A9 3D3D3D3D3D0D0A     
+   268 000002B0 43686F6963653A2000                      db "Choice: ",0
+   269                                  
+   270 000002B9 310D0A00                msg_menu_s2     db "1",13,10,0
+   271 000002BD 320D0A                  msg_menu_orig   db "2",13,10,
+   272 000002C0 417474656D7074696E-                     db "Attempting to boot original OS...",13,10,0
+   272 000002C9 6720746F20626F6F74-
+   272 000002D2 206F726967696E616C-
+   272 000002DB 204F532E2E2E0D0A00 
+   273 000002E4 4E6F206F7468657220-     msg_menu_fallback db "No other bootable drive found.",13,10
+   273 000002ED 626F6F7461626C6520-
+   273 000002F6 647269766520666F75-
+   273 000002FF 6E642E0D0A         
+   274 00000304 46616C6C696E672062-                       db "Falling back to UNIOS...",13,10,13,10,0
+   274 0000030D 61636B20746F20554E-
+   274 00000316 494F532E2E2E0D0A0D-
+   274 0000031F 0A00               
+   275                                  
+   276 00000321 00<rep 10h>             dap             times 16 db 0
+   277 00000331 00<rep 10h>             dap2            times 16 db 0
