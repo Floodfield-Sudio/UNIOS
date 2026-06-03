@@ -6,14 +6,6 @@
 ; Commands: help, cpu, mem, arch, disk, clear, reboot, exit,
 ;           kbd, lg, install
 ;
-; New in v0.4:
-;   exit    — ACPI / APM power-off
-;   install — Stage 3 install guide
-;   lg      — Set language: lg en-us | lg fr-fr
-;   kbd     — Toggle QWERTY / AZERTY (saves to INFO_BLOCK)
-;   ↑ / ↓   — Command history navigation (10 entries)
-;   Persistent settings in INFO_BLOCK+0x10 (lang) / +0x11 (kbd)
-;
 ; Memory layout:
 ;   0x0500  INFO_BLOCK   (shared with Stage 0/1)
 ;   0x2000  E820_MAP
@@ -409,43 +401,45 @@ cmd_disk_fn:
     int  0x13
     jc   .disk_fail
 
+    ; Sauvegarde immédiate des registres retournés par le BIOS
+    push cx
+    push dx
+
+    ; --- 1. Cylindres ---
+    xor  ax, ax
     mov  al, cl
     and  al, 0xC0
     shl  ax, 2
-    mov  ah, ch
-    inc  ax
-    push ax
+    mov  al, ch
+    inc  ax                 ; Total cylindres = Max index + 1
+    movzx eax, ax
 
+    mov  si, msg_disk_cyl
+    call s2_puts
+    call s2_print_dec
+    call s2_crlf
+
+    ; --- 2. Têtes (Heads) ---
+    pop  dx
+    push dx
     mov  al, dh
     inc  al
     movzx eax, al
-    push ax
 
+    mov  si, msg_disk_heads
+    call s2_puts
+    call s2_print_dec
+    call s2_crlf
+
+    ; --- 3. Secteurs ---
+    pop  dx
+    pop  cx
     mov  al, cl
     and  al, 0x3F
     movzx eax, al
 
-    mov  si, msg_disk_cyl
-    call s2_puts
-    pop  ax
-    push ax
-    call s2_print_dec
-    call s2_crlf
-
-    mov  si, msg_disk_heads
-    call s2_puts
-    pop  ax
-    pop  bx
-    push bx
-    push ax
-    mov  ax, bx
-    call s2_print_dec
-    call s2_crlf
-
     mov  si, msg_disk_sect
     call s2_puts
-    pop  ax
-    pop  bx
     call s2_print_dec
     call s2_crlf
 
@@ -473,45 +467,41 @@ cmd_reboot_fn:
     jmp  0xFFFF:0x0000
 
 ; =============================================================================
-; COMMAND: exit  — Power off via APM / ACPI
+; COMMAND: exit
 ; =============================================================================
 cmd_exit_fn:
     mov  si, msg_exit
     call s2_puts
 
-    ; --- Try APM power-off (works on QEMU and real hardware with APM BIOS) ---
-    mov  ax, 0x5301         ; APM: connect (real-mode interface)
-    xor  bx, bx             ; device 0 = APM BIOS
+    mov  ax, 0x5301
+    xor  bx, bx
     int  0x15
 
-    mov  ax, 0x5308         ; APM: enable power management for all devices
+    mov  ax, 0x5308
     mov  bx, 0x0001
     mov  cx, 0x0001
     int  0x15
 
-    mov  ax, 0x5307         ; APM: set power state = off
-    mov  bx, 0x0001         ; all devices
-    mov  cx, 0x0003         ; state = off
+    mov  ax, 0x5307
+    mov  bx, 0x0001
+    mov  cx, 0x0003
     int  0x15
 
-    ; --- Try ACPI port write (QEMU PIIX4 / Q35 default shutdown port) -------
-    mov  dx, 0x604          ; QEMU ACPI power-management I/O port
-    mov  ax, 0x2000         ; PM1_STS SLP_EN=1, SLP_TYP=0 (S5 off)
+    mov  dx, 0x604
+    mov  ax, 0x2000
     out  dx, ax
 
-    ; --- Fallback: try legacy power port (VirtualBox / old BIOSes) ----------
     mov  dx, 0xB004
     mov  ax, 0x2000
     out  dx, ax
 
-    ; --- Last resort: halt the CPU -------------------------------------------
     mov  si, msg_halt
     call s2_puts
     cli
     hlt
 
 ; =============================================================================
-; COMMAND: install  — Stage 3 installation guide
+; COMMAND: install
 ; =============================================================================
 cmd_install_fn:
     mov  si, msg_install
@@ -519,7 +509,7 @@ cmd_install_fn:
     jmp  shell_loop
 
 ; =============================================================================
-; COMMAND: kbd - Cycle keyboard presets
+; COMMAND: kbd
 ; =============================================================================
 cmd_kbd_fn:
     mov  al, [kbd_layout]
@@ -529,7 +519,7 @@ cmd_kbd_fn:
     xor  al, al
 .store:
     mov  [kbd_layout], al
-    mov  [INFO_BLOCK + 0x11], al   ; persist to INFO_BLOCK
+    mov  [INFO_BLOCK + 0x11], al
 
     mov  si, msg_kbd_set
     call s2_puts
@@ -542,17 +532,16 @@ cmd_kbd_fn:
     jmp  shell_loop
 
 ; =============================================================================
-; COMMAND: lg - Set language / locale
+; COMMAND: lg
 ; =============================================================================
 cmd_lg_fn:
-    ; Check for argument at INPUT_BUF+3
     cmp  byte [INPUT_BUF + 2], ' '
-    jne  .show_current      ; no argument -> show current setting
+    jne  .show_current
 
     mov  si, INPUT_BUF
-    add  si, 3              ; skip "lg "
+    add  si, 3
 
-    xor  bx, bx             ; table offset (2 bytes / entry)
+    xor  bx, bx
 
 .match_loop:
     cmp  bx, LANG_COUNT * 2
@@ -646,37 +635,7 @@ cmd_lg_fn:
     jmp  shell_loop
 
 ; =============================================================================
-; erase_n_chars; =============================================================================
-; erase_n_chars — Erase BX characters from terminal (BS-SP-BS each)
-; Preserves all registers.
-; =============================================================================
-erase_n_chars:
-    push ax
-    push bx
-    push cx
-    mov  cx, bx
-    xor  bh, bh
-.loop:
-    test cx, cx
-    jz   .done
-    mov  ah, 0x0E
-    mov  al, 8
-    int  0x10
-    mov  al, ' '
-    int  0x10
-    mov  al, 8
-    int  0x10
-    dec  cx
-    jmp  .loop
-.done:
-    pop  cx
-    pop  bx
-    pop  ax
-    ret
-
-; =============================================================================
-; hist_save_current — Save INPUT_BUF into history ring buffer
-; Call after a non-empty line is submitted (from inside s2_readline).
+; History functions
 ; =============================================================================
 hist_save_current:
     push ax
@@ -684,14 +643,12 @@ hist_save_current:
     push di
     push cx
 
-    ; Destination = HIST_BUF + hist_head * HIST_LEN
     mov  ax, [hist_head]
     mov  cx, HIST_LEN
-    mul  cx                 ; AX = offset (fits in 16 bits: max 9*80=720)
+    mul  cx
     add  ax, HIST_BUF
     mov  di, ax
 
-    ; Copy INPUT_BUF → slot (null-terminated, max HIST_LEN-1)
     mov  si, INPUT_BUF
     mov  cx, HIST_LEN - 1
 .copy:
@@ -700,10 +657,9 @@ hist_save_current:
     test al, al
     jz   .done
     loop .copy
-    mov  byte [di], 0       ; force null termination
+    mov  byte [di], 0
 .done:
 
-    ; Advance hist_head (ring wrap)
     mov  ax, [hist_head]
     inc  ax
     cmp  ax, HIST_MAX
@@ -712,7 +668,6 @@ hist_save_current:
 .no_wrap:
     mov  [hist_head], ax
 
-    ; Increment count (cap at HIST_MAX)
     mov  ax, [hist_count]
     cmp  ax, HIST_MAX
     jge  .skip_inc
@@ -720,7 +675,6 @@ hist_save_current:
     mov  [hist_count], ax
 .skip_inc:
 
-    ; Reset navigation cursor
     mov  word [hist_cur], 0xFFFF
 
     pop  cx
@@ -729,30 +683,24 @@ hist_save_current:
     pop  ax
     ret
 
-; =============================================================================
-; hist_get_ptr — Return SI pointing to history entry AX (0=newest)
-; Uses ring buffer: actual_idx = (hist_head - 1 - AX + 1000) % HIST_MAX
-; Clobbers nothing (saves/restores BX, CX, DX).
-; =============================================================================
 hist_get_ptr:
     push ax
     push bx
     push cx
     push dx
 
-    mov  bx, ax             ; BX = relative index
-    mov  ax, [hist_head]    ; AX = hist_head (next-write slot)
-    dec  ax                 ; -1 → most-recent slot
-    sub  ax, bx             ; -relative
-    add  ax, 1000           ; ensure positive (HIST_MAX*100)
+    mov  bx, ax
+    mov  ax, [hist_head]
+    dec  ax
+    sub  ax, bx
+    add  ax, 1000
     xor  dx, dx
     mov  cx, HIST_MAX
-    div  cx                 ; DX = actual_idx in ring buffer
+    div  cx
 
-    ; SI = HIST_BUF + actual_idx * HIST_LEN
     mov  ax, dx
     mov  cx, HIST_LEN
-    mul  cx                 ; AX = actual_idx * HIST_LEN (≤720, fits in AX)
+    mul  cx
     add  ax, HIST_BUF
     mov  si, ax
 
@@ -762,19 +710,13 @@ hist_get_ptr:
     pop  ax
     ret
 
-; =============================================================================
-; hist_load_entry - Load history[hist_cur] into buffer at DI, update BX length
-; Returns BX = length, buffer is null-terminated.
-; =============================================================================
 hist_load_entry:
     push ax
     push si
 
-    ; Get pointer to the entry
     mov  ax, [hist_cur]
-    call hist_get_ptr       ; SI = entry pointer
+    call hist_get_ptr
 
-    ; Copy to DI buffer, count into BX
     xor  bx, bx
 .copy:
     lodsb
@@ -793,13 +735,17 @@ hist_load_entry:
     ret
 
 ; =============================================================================
-; s2_set_cursor_offset - Position the cursor at prompt-start + AX columns.
-; Input:  AX = offset from the beginning of the current command line.
-; Uses:   [rl_start_row], [rl_start_col].
+; Text processing / Screen mapping
+; =============================================================================
+
+; =============================================================================
+; s2_set_cursor_offset (SÉCURISÉE - AUCUN EFFET SECONDAIRE)
 ; =============================================================================
 s2_set_cursor_offset:
+    push ax
     push bx
     push cx
+    push dx
 
     xor  bx, bx
     mov  bl, [rl_start_col]
@@ -807,28 +753,26 @@ s2_set_cursor_offset:
 
     xor  dx, dx
     mov  bx, 80
-    div  bx                 ; AX = row delta, DX = column
+    div  bx                 ; AX = quotient (lignes), DX = reste (colonnes)
 
-    mov  cx, ax             ; CX = row delta
+    mov  cx, ax
     mov  al, [rl_start_row]
-    add  al, cl
-    mov  dh, al
-    ; DL already contains the column
+    add  al, cl             ; AL = start_row + ligne calculée
+    mov  dh, al             ; DH = ligne finale
+    ; DL contient déjà la bonne colonne absolue car c'était le reste de la division
 
     mov  ah, 0x02
     xor  bh, bh
-    int  0x10
+    int  0x10               ; Positionnement du curseur physique par le BIOS
 
+    pop  dx
     pop  cx
     pop  bx
+    pop  ax
     ret
 
 ; =============================================================================
-; s2_readline - Read one line from keyboard into [DI], max CX chars.
-; Supports: Backspace, Delete, Enter, Left/Right cursor movement,
-; Home/End, Up/Down history navigation.
-; On entry: DI = buffer address, CX = max chars including room for null.
-; On exit:  [DI] = null-terminated string.
+; s2_readline
 ; =============================================================================
 s2_readline:
     push ax
@@ -839,7 +783,12 @@ s2_readline:
     push di
     push bp
 
-    ; Capture the current cursor position where the prompt ends.
+    ; === FIX CRITIQUE 1: Forcer ES à 0 ===
+    ; Répare le bogue d'insertion (caractère fantôme)
+    xor  ax, ax
+    mov  es, ax
+    ; =====================================
+
     mov  ah, 0x03
     xor  bh, bh
     int  0x10
@@ -850,8 +799,8 @@ s2_readline:
     dec  ax
     mov  [rl_max], ax
 
-    xor  bx, bx             ; BX = current length
-    xor  dx, dx             ; DX = cursor position within the buffer
+    xor  bx, bx
+    xor  dx, dx
     mov  word [rl_prev_len], 0
     mov  word [hist_cur], 0xFFFF
     mov  byte [di], 0
@@ -874,26 +823,29 @@ s2_readline:
     jae  .loop
 
     call map_scancode
-
+.insert_or_append:
     cmp  dx, bx
     je   .append
 
-    ; Insert at cursor: shift tail right by one byte.
-    push di                 ; keep buffer base for the terminator write
+    push di
     mov  bp, di
     add  bp, dx
     mov  si, di
     add  si, bx
     mov  di, si
     inc  di
-    mov  ax, bx
-    sub  ax, dx
-    inc  ax
-    mov  cx, ax
+    
+    ; === FIX CRITIQUE 3: Protection de AL ===
+    ; Utilisation exclusive de CX pour éviter de détruire la lettre dans AL
+    mov  cx, bx
+    sub  cx, dx
+    inc  cx
+    ; ========================================
+
     std
     rep  movsb
     cld
-    pop  di                 ; restore buffer base
+    pop  di
     jmp  .store_char
 
 .append:
@@ -913,16 +865,17 @@ s2_readline:
     jz   .loop
     dec  dx
 
-    ; Shift the tail left starting at the deleted character.
     push di
     mov  bp, di
     add  bp, dx
     mov  si, bp
     inc  si
     mov  di, bp
-    mov  ax, bx
-    sub  ax, dx
-    mov  cx, ax
+
+    ; Optimisé pour ne pas utiliser AX
+    mov  cx, bx
+    sub  cx, dx
+
     cld
     rep  movsb
     dec  bx
@@ -947,7 +900,13 @@ s2_readline:
     je   .cursor_end
     cmp  ah, 0x53
     je   .delete_char
-    jmp  .loop
+    
+    test al, al
+    jz   .loop
+    cmp  bx, [rl_max]
+    jae  .loop
+    call map_scancode
+    jmp  .insert_or_append
 
 .cursor_left:
     test dx, dx
@@ -977,16 +936,17 @@ s2_readline:
     cmp  dx, bx
     jae  .loop
 
-    ; Delete the character under the cursor and compact the tail.
     push di
     mov  bp, di
     add  bp, dx
     mov  si, bp
     inc  si
     mov  di, bp
-    mov  ax, bx
-    sub  ax, dx
-    mov  cx, ax
+
+    ; Optimisé pour ne pas utiliser AX
+    mov  cx, bx
+    sub  cx, dx
+
     cld
     rep  movsb
     dec  bx
@@ -1051,12 +1011,6 @@ s2_readline:
     pop  ax
     ret
 
-; =============================================================================
-; s2_line_vram_offset - Compute video memory offset for a line-relative position.
-; Input:  AX = offset from the beginning of the current command line.
-; Output: DI = byte offset in B800:0000 for text mode.
-; Uses:   [rl_start_row], [rl_start_col].
-; =============================================================================
 s2_line_vram_offset:
     push bx
     push cx
@@ -1068,18 +1022,18 @@ s2_line_vram_offset:
 
     xor  dx, dx
     mov  bx, 80
-    div  bx                 ; AX = row delta, DX = column
+    div  bx
 
-    push dx                 ; save column
+    push dx
     xor  bx, bx
     mov  bl, [rl_start_row]
-    add  ax, bx             ; AX = absolute row
+    add  ax, bx
 
     mov  bx, 80
-    mul  bx                 ; DX:AX = row * 80
-    pop  cx                 ; CX = column
-    add  ax, cx             ; + column
-    shl  ax, 1              ; * 2 bytes per cell
+    mul  bx
+    pop  cx
+    add  ax, cx
+    shl  ax, 1
     mov  di, ax
 
     pop  dx
@@ -1088,29 +1042,57 @@ s2_line_vram_offset:
     ret
 
 ; =============================================================================
-; s2_redraw_line - Redraw the current input buffer and position the cursor.
-; Input: DI = buffer, BX = current length, DX = cursor position.
+; s2_redraw_line (STABLE & RESTAURÉ)
 ; =============================================================================
 s2_redraw_line:
     push ax
     push bx
     push cx
-    push dx
+    push dx       ; <-- DX (Position curseur) sauvegardé sur la pile
     push si
     push di
     push es
 
-    ; Draw directly into text video memory to avoid teletype artifacts.
+    ; --- CALCUL ET GESTION DU SCROLLING AUTOMATIQUE ---
+    mov  ax, bx
+    cmp  ax, [rl_prev_len]
+    jae  .use_bx
+    mov  ax, [rl_prev_len]
+.use_bx:
+    xor  cx, cx
+    mov  cl, [rl_start_col]
+    add  ax, cx
+    mov  cx, 80
+    xor  dx, dx
+    div  cx                 ; division (AH = reste, AL = quotient)
+    add  al, [rl_start_row]
+    cmp  al, 25
+    jb   .no_scroll
+
+    sub  al, 24
+    push ax
+
+    mov  ah, 0x06
+    mov  bh, 0x07
+    xor  cx, cx
+    mov  dx, 0x184F
+    int  0x10
+
+    pop  ax
+    sub  [rl_start_row], al
+.no_scroll:
+
+    ; Dessin VRAM
     mov  ax, 0xB800
     mov  es, ax
     cld
 
     mov  si, di
     xor  ax, ax
-    call s2_line_vram_offset    ; DI = video offset for start of line
+    call s2_line_vram_offset
     mov  cx, bx
 
-    mov  ah, 0x07               ; light grey on black (classic text mode)
+    mov  ah, 0x07
 .draw_chars:
     test cx, cx
     jz   .clear_tail
@@ -1125,7 +1107,7 @@ s2_redraw_line:
     jbe  .set_cursor
     sub  ax, bx
     mov  cx, ax
-    mov  ax, 0x0720             ; space + attribute
+    mov  ax, 0x0720
 .clear_loop:
     test cx, cx
     jz   .set_cursor
@@ -1134,22 +1116,26 @@ s2_redraw_line:
     jmp  .clear_loop
 
 .set_cursor:
-    mov  ax, dx
-    call s2_set_cursor_offset
     mov  [rl_prev_len], bx
 
+    ; === RESTAURATION PROPRE ET COMPLÈTE ===
     pop  es
     pop  di
     pop  si
-    pop  dx
+    pop  dx                 ; <-- DX retrouve sa VRAIE valeur d'index texte
     pop  cx
     pop  bx
+    pop  ax
+
+    ; On appelle notre fonction de curseur sans AUCUN risque de corruption
+    push ax
+    mov  ax, dx
+    call s2_set_cursor_offset
     pop  ax
     ret
 
 ; =============================================================================
-; map_scancode - Convert BIOS ASCII in AL from the active physical layout.
-; kbd_layout selects one entry in kbd_map_table.
+; map_scancode
 ; =============================================================================
 map_scancode:
     push bx
@@ -1348,13 +1334,8 @@ help_text       db 13,10
                 db "  clear         Clear screen",13,10
                 db "  reboot        Restart machine",13,10
                 db "  exit          Power off machine",13,10
-                db "  [Left/Right]  Move within the current command line",13,10
-                db "  [Home/End]    Jump to start/end of the line",13,10
-                db "  [Del]         Delete the character under the cursor",13,10
-                db "  [Up/Down]     Navigate command history (10 entries)",13,10
                 db 13,10,0
 
-; Command strings
 cmd_help        db "help",0
 cmd_cpu         db "cpu",0
 cmd_mem         db "mem",0
@@ -1366,7 +1347,6 @@ cmd_exit        db "exit",0
 cmd_kbd         db "kbd",0
 cmd_install     db "install",0
 
-; CPU messages
 msg_cpu_vendor  db "  CPU Vendor  : ",0
 msg_cpu_mode    db "  CPU Mode    : ",0
 msg_cpu_64      db "64-bit (Long Mode)",13,10,0
@@ -1377,7 +1357,6 @@ msg_cpu_model   db "  Model       : ",0
 msg_cpu_stepping db "  Stepping    : ",0
 msg_cpu_brand   db "  Brand       : ",0
 
-; Memory messages
 msg_mem_header  db 13,10,"E820 Memory Map:",13,10
                 db "Base       Length     Type",13,10
                 db "---------- ---------- ----------------",13,10,0
@@ -1388,7 +1367,6 @@ msg_type_acpi_nvs db "ACPI NVS",0
 msg_type_unknown db "Unknown",0
 msg_mem_fail    db "No memory map available.",13,10,0
 
-; Arch messages
 msg_arch_summary db 13,10,"Platform Summary:",13,10,0
 msg_ram_label   db "  Total RAM   : ",0
 msg_mb          db " MB",0
@@ -1396,28 +1374,21 @@ msg_boot_drive  db "  Boot Drive  : 0x",0
 msg_arch_lang   db "  Language    : ",0
 msg_arch_kbd    db "  Keyboard    : ",0
 
-; Disk messages
 msg_disk_info   db 13,10,"Disk Geometry (BIOS INT 13h AH=08h):",13,10,0
 msg_disk_cyl    db "  Cylinders   : ",0
 msg_disk_heads  db "  Heads       : ",0
 msg_disk_sect   db "  Sectors/Trk : ",0
 msg_disk_fail   db "BIOS disk query failed.",13,10,0
 
-; Keyboard messages
-
-; Reboot / exit messages
 msg_reboot      db "Rebooting...",13,10,0
 msg_exit        db "Shutting down...",13,10,0
 msg_halt        db "ACPI/APM unavailable. System halted.",13,10,0
 
-; Language messages
-msg_lg_usage    db "Usage: lg <locale> (en-us fr-fr de-de es-es it-it pt-br ru-ru ar-sa zh-cn zh-tw ja-jp ko-kr)",13,10
-                db "Keyboard presets are matched to the locale when available.",13,10,0
+msg_lg_usage    db "Usage: lg <locale> (en-us fr-fr de-de es-es it-it pt-br ru-ru)",13,10,0
 msg_lg_set_en   db "Language: English (en-us) — Keyboard: QWERTY",13,10,0
 msg_lg_set_fr   db "Langue : Francais (fr-fr) — Clavier : AZERTY",13,10,0
 msg_lg_current_old  db "Language: ",0
 
-; Install message
 msg_install     db 13,10
                 db "+-----------------------------------------+",13,10
                 db "| UNIOS Stage 3 Installation              |",13,10
@@ -1425,23 +1396,8 @@ msg_install     db 13,10
                 db "Stage 3 adds:",13,10
                 db "  - Protected mode (32-bit / 64-bit)",13,10
                 db "  - OS launcher (Windows / Linux / macOS)",13,10
-                db "  - Multi-machine KVM (keyboard/mouse/audio",13,10
-                db "    sharing across PCs)",13,10
-                db "  - Hypervisor with virtualisation + emul.",13,10
-                db 13,10
-                db "How to install (coming in v0.3):",13,10
-                db "  1. Obtain unios-stage3.img",13,10
-                db "     (download or build from source)",13,10
-                db "  2. Write to a USB drive:",13,10
-                db "       dd if=unios-stage3.img of=/dev/sdX",13,10
-                db "  3. Reboot with USB inserted",13,10
-                db "  4. Select UNIOS from boot menu",13,10
-                db "  5. Type: install usb",13,10
-                db 13,10
-                db "[Not yet implemented - target: UNIOS v0.3]",13,10
                 db 13,10,0
 
-; Shared locale / keyboard strings
 str_en_us       db "en-us",0
 str_fr_fr       db "fr-fr",0
 str_de_de       db "de-de",0
@@ -1489,7 +1445,6 @@ msg_lg_sep       db " | Keyboard: ",0
 lang_id         db 0
 kbd_layout      db 0
 
-; History ring-buffer state (all zero-initialised in BSS, set at _start)
 hist_head       dw 0
 hist_count      dw 0
 hist_cur        dw 0xFFFF
@@ -1499,25 +1454,22 @@ rl_prev_len     dw 0
 rl_max          dw 0
 
 ; =============================================================================
-; Locale and keyboard mapping tables
+; Tables & Mappings
 ; =============================================================================
 lang_display_table dw disp_en_us, disp_fr_fr, disp_de_de, disp_es_es, disp_it_it, disp_pt_br, disp_ru_ru, disp_ar_sa, disp_zh_cn, disp_zh_tw, disp_ja_jp, disp_ko_kr
 kbd_display_table  dw kbd_disp_qwerty, kbd_disp_azerty, kbd_disp_qwertz, kbd_disp_es_es, kbd_disp_it_it, kbd_disp_pt_br, kbd_disp_ru_ru, kbd_disp_ar_sa, kbd_disp_zh_cn, kbd_disp_zh_tw, kbd_disp_ja_jp, kbd_disp_ko_kr
 locale_code_table  dw str_en_us, str_fr_fr, str_de_de, str_es_es, str_it_it, str_pt_br, str_ru_ru, str_ar_sa, str_zh_cn, str_zh_tw, str_ja_jp, str_ko_kr
 locale_default_kbd db 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
-kbd_map_table     dw qwerty_chars, azerty_chars, qwertz_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars
+kbd_map_table      dw qwerty_chars, azerty_chars, qwertz_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars, qwerty_chars
 
 ; =============================================================================
-; Keyboard layout mapping tables
+; Keyboard layout tables (CP437)
 ; =============================================================================
-; Parallel arrays: qwerty_chars[i] maps to the active layout table at index i
-; Additional layouts can reuse qwerty_chars as Latin fallbacks in Stage 2
-
 qwerty_chars    db "1234567890-=qwertyuiop[]asdfghjkl;'`zxcvbnm,./"
                 db "!@#$%^&*()_+QWERTYUIOP{}ASDFGHJKL:", 0x22, "~ZXCVBNM<>?",0
 
-azerty_chars    db "&", 0xE9, 0x22, 0x27, "(-", 0xE8, "_", 0xE7, 0xE0, ")=azertyuiop^$qsdfghjklm", 0xF9, 0xB2, "wxcvbn,;:!"
-                db "1234567890", 0xB0, "+AZERTYUIOP", 0xA8, "$QSDFGHJKLM%", 0xA3, "WXCVBN?./", 0xA7, 0
+azerty_chars    db "&", 0x82, 0x22, 0x27, "(-", 0x8A, "_", 0x87, 0x85, ")=azertyuiop^$qsdfghjklm", 0x97, 0xFD, "wxcvbn,;:!"
+                db "1234567890", 0xF8, "+AZERTYUIOP", 0x22, "$QSDFGHJKLM%", 0x9C, "WXCVBN?./", 0x15, 0
 
 qwertz_chars    db "1234567890-=qwertzuiop[]asdfghjkl;'`yxcvbnm,./"
                 db "!@#$%^&*()_+QWERTZUIOP{}ASDFGHJKL:", 0x22, "~YXCVBNM<>?",0
