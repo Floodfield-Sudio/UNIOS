@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<!-- Open Graph -->
+<meta property="og:title" content="UNIOS — Floodfield Studios" />
+<meta property="og:description" content="UNIOS : un système d'exploitation universel, construit depuis le secteur de boot." />
+<meta property="og:image" content="https://floodfield-sudio.github.io/FFS.index/assets/img/floodfiled_studio-sans_fond.png" />
+<meta property="og:url" content="https://floodfield-sudio.github.io/FFS.index/unios.html" />
+<meta property="og:type" content="website" />
+<!-- Discord couleur embed -->
+<meta name="theme-color" content="#5865F2" />
+<!-- Twitter / X -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="UNIOS — Floodfield Studios" />
+<meta name="twitter:description" content="UNIOS : un système d'exploitation universel, construit depuis le secteur de boot." />
+<meta name="twitter:image" content="https://floodfield-sudio.github.io/FFS.index/assets/img/floodfiled_studio-sans_fond.png" />
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>UNIOS — Floodfield Studios</title>
+<link rel="icon" type="image/png" sizes="32x32" href="assets/img/floodfiled_studio-sans_fond.png">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+:root {
+  --bg-color: #0d1117;
+  --card-bg: #161b22;
+  --text-primary: #c9d1d9;
+  --text-secondary: #8b949e;
+  --accent: #58a6ff;
+  --border: #30363d;
+}
+body {
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.6;
+}
+.glass-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  transition: transform 0.2s ease, border-color 0.2s ease;
+}
+.glass-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+.project-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+.project-link:hover {
+  text-decoration: underline;
+}
+.badge-container img {
+  display: inline-block;
+  transition: opacity 0.2s;
+}
+.badge-container img:hover {
+  opacity: 0.8;
+}
+.lang-btn {
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text-primary);
+  border-radius: 9999px;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.875rem;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+.lang-btn.active {
+  border-color: var(--accent);
+  color: white;
+  box-shadow: 0 0 0 1px rgba(88,166,255,0.18) inset;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace; }
+.inline-code {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 5px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.85em;
+}
+pre.codeblock {
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  color: #d4d8e0;
+}
+pre.codeblock .c { color: var(--text-secondary); }
+table.uos-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+table.uos-table th {
+  text-align: left; color: var(--text-secondary); font-weight: 600; font-size: 0.78rem;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+table.uos-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.uos-table tr:last-child td { border-bottom: none; }
+.stage-entry { border-left: 4px solid; padding-left: 1rem; padding-top: 0.25rem; padding-bottom: 0.25rem; }
+.tab-btn {
+  border: 1px solid var(--border); background: var(--card-bg); color: var(--text-secondary);
+  border-radius: 9999px; padding: 0.4rem 0.9rem; font-size: 0.82rem; cursor: pointer; transition: all .2s ease;
+}
+.tab-btn.active { border-color: var(--accent); color: white; box-shadow: 0 0 0 1px rgba(88,166,255,0.18) inset; }
+.build-pane { display:none; }
+.build-pane.active { display:block; }
+[data-lang="en"] { display:none; }
+html[data-active="en"] [data-lang="fr"] { display:none; }
+html[data-active="en"] [data-lang="en"] { display:inline; }
+html[data-active="en"] [data-lang="en"].block { display:block; }
+</style>
+</head>
+<body class="min-h-screen flex flex-col items-center p-6 md:p-12">
+
+<div class="w-full max-w-4xl flex justify-between items-center mb-8">
+  <a href="./" class="project-link text-sm">&larr; <span data-lang="fr">Floodfield Studios</span><span data-lang="en">Floodfield Studios</span></a>
+  <div class="flex gap-2">
+    <button class="lang-btn" id="btn-en" type="button">EN</button>
+    <button class="lang-btn active" id="btn-fr" type="button">FR</button>
+  </div>
+</div>
+
+<!-- Header / Logo -->
+<header class="w-full max-w-4xl flex flex-col items-center mb-12 text-center">
+  <div class="mb-6">
+    <img alt="Floodfield Studio Logo" class="w-24 md:w-28 h-auto rounded-lg" onerror="this.style.display='none'" src="assets/img/floodfiled_studio-sans_fond.png"/>
+  </div>
+  <h1 class="text-4xl font-bold text-white mb-2">UNIOS</h1>
+  <div class="h-1 w-20 bg-blue-500 rounded-full mb-5"></div>
+  <p class="text-gray-400 max-w-xl">
+    <span data-lang="fr">Un système d'exploitation universel, construit depuis le secteur de boot — il détecte le matériel, puis orchestre d'autres OS au lieu de les remplacer.</span>
+    <span data-lang="en">A universal operating system, built from the boot sector up — it detects the hardware, then orchestrates other OSes instead of replacing them.</span>
+  </p>
+  <div class="flex flex-wrap gap-3 badge-container mt-5 justify-center">
+    <img alt="Status" src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge"/>
+    <img alt="Stage" src="https://img.shields.io/badge/stage-2%2F4-58a6ff?style=for-the-badge"/>
+    <img alt="Arch" src="https://img.shields.io/badge/arch-x86_real--mode-30363d?style=for-the-badge"/>
+    <a href="https://github.com/Floodfield-Sudio/UNIOS" target="_blank">
+      <img alt="GitHub" src="https://img.shields.io/badge/View_on-GitHub-181717?style=for-the-badge&amp;logo=github&amp;logoColor=white"/>
+    </a>
+  </div>
+</header>
+
+<!-- Main Content -->
+<main class="w-full max-w-4xl space-y-10">
+
+  <!-- Vision -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-4 flex items-center">
+      <span class="mr-2">🌍</span> <span data-lang="fr">Vision</span><span data-lang="en">Vision</span>
+    </h2>
+    <p class="text-gray-400">
+      <span data-lang="fr">UNIOS n'est pas un clone d'OS de plus : c'est une tentative de construire une <strong class="text-white">plateforme de boot universelle</strong>, capable à terme de démarrer sur un très grand nombre d'architectures (PC anciens et récents, Raspberry Pi, mobiles, x86 et ARM), d'orchestrer d'autres systèmes (Windows, Linux, Android, macOS) plutôt que de les remplacer, de partager des périphériques entre plusieurs machines comme un KVM logiciel distribué, et de servir d'environnement de diagnostic universel, même quand l'OS d'origine ne démarre plus.</span>
+      <span data-lang="en">UNIOS isn't just another OS clone: it's an attempt to build a <strong class="text-white">universal boot platform</strong>, eventually able to boot on a huge range of architectures (old and modern PCs, Raspberry Pi, mobiles, x86 and ARM), orchestrate other systems (Windows, Linux, Android, macOS) instead of replacing them, share devices across machines like a distributed software KVM, and act as a universal diagnostic environment, even when the original OS can no longer boot.</span>
+    </p>
+  </section>
+
+  <!-- État actuel -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-2 flex items-center">
+      <span class="mr-2">📊</span> <span data-lang="fr">Où en est le projet</span><span data-lang="en">Where the project stands</span>
+    </h2>
+    <p class="text-gray-500 text-sm mb-6">
+      <span data-lang="fr">UNIOS est en alpha précoce — voici ce qui tourne réellement aujourd'hui.</span>
+      <span data-lang="en">UNIOS is in early alpha — here's what actually runs today.</span>
+    </p>
+
+    <div class="space-y-1">
+      <div class="stage-entry border-green-500">
+        <h4 class="text-lg font-medium text-white">Stage 0 — <span data-lang="fr">Pré-bootloader (MBR)</span><span data-lang="en">Pre-bootloader (MBR)</span></h4>
+        <p class="text-sm text-gray-500 italic mt-1"><span data-lang="fr">Fonctionnel — CPUID, chargement Stage 1</span><span data-lang="en">Working — CPUID, loads Stage 1</span></p>
+      </div>
+      <div class="stage-entry border-green-500">
+        <h4 class="text-lg font-medium text-white">Stage 1 — <span data-lang="fr">Bootloader adapté</span><span data-lang="en">Adaptive bootloader</span></h4>
+        <p class="text-sm text-gray-500 italic mt-1"><span data-lang="fr">Fonctionnel — E820, menu multi-sources, chargement Stage 2</span><span data-lang="en">Working — E820, multi-source menu, loads Stage 2</span></p>
+      </div>
+      <div class="stage-entry border-green-500">
+        <h4 class="text-lg font-medium text-white">Stage 2 — <span data-lang="fr">Shell de diagnostic</span><span data-lang="en">Diagnostic shell</span></h4>
+        <p class="text-sm text-gray-500 italic mt-1"><span data-lang="fr">Fonctionnel — historique, édition de ligne, 12 locales/claviers</span><span data-lang="en">Working — history, line editing, 12 locales/keyboards</span></p>
+      </div>
+      <div class="stage-entry border-yellow-600">
+        <h4 class="text-lg font-medium text-gray-300">Stage 3 — <span data-lang="fr">OS complet</span><span data-lang="en">Full OS</span></h4>
+        <p class="text-sm text-gray-500 italic mt-1"><span data-lang="fr">Roadmap — mode protégé/long mode, pas encore implémenté</span><span data-lang="en">Roadmap — protected/long mode, not implemented yet</span></p>
+      </div>
+      <div class="stage-entry border-yellow-600">
+        <h4 class="text-lg font-medium text-gray-300">Stage 4 — <span data-lang="fr">Hyperviseur multi-machines</span><span data-lang="en">Multi-machine hypervisor</span></h4>
+        <p class="text-sm text-gray-500 italic mt-1"><span data-lang="fr">Roadmap — vision long terme</span><span data-lang="en">Roadmap — long-term vision</span></p>
+      </div>
+      <div class="stage-entry border-blue-500">
+        <h4 class="text-lg font-medium text-white">UNIASM</h4>
+        <p class="text-sm text-gray-500 italic mt-1"><span data-lang="fr">Prototype séparé — le build actuel utilise NASM</span><span data-lang="en">Separate prototype — current build uses NASM</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-2 flex items-center">
+      <span class="mr-2">🏗️</span> <span data-lang="fr">Architecture en 4 couches</span><span data-lang="en">Four-layer architecture</span>
+    </h2>
+    <p class="text-gray-500 text-sm mb-6">
+      <span data-lang="fr">Chaque étage ne charge que le strict nécessaire pour passer la main au suivant — l'ordre est littéralement la séquence d'exécution au démarrage.</span>
+      <span data-lang="en">Each stage loads only what's needed to hand off to the next — the order is literally the boot execution sequence.</span>
+    </p>
+    <pre class="codeblock mono">BIOS/UEFI
+  └─ Stage 0  (MBR, 0x7C00)    <span class="c">CPUID, charge Stage 1</span>
+       └─ Stage 1  (0x7E00)     <span class="c">E820, menu multi-sources, charge Stage 2</span>
+            └─ Stage 2  (0x9000)  <span class="c">shell de diagnostic interactif</span>
+                 └─ Stage 3  (roadmap)  <span class="c">mode protégé/long, hyperviseur</span></pre>
+  </section>
+
+  <!-- Shell -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-2 flex items-center">
+      <span class="mr-2">💻</span> <span data-lang="fr">Le shell de diagnostic</span><span data-lang="en">The diagnostic shell</span>
+    </h2>
+    <p class="text-gray-500 text-sm mb-6">
+      <span data-lang="fr">Une fois les trois stages chargés, l'invite</span> <code class="inline-code">UNIOS&gt;</code> <span data-lang="fr">donne accès à un véritable shell bas niveau.</span>
+      <span data-lang="en">Once the three stages are loaded, the</span> <code class="inline-code">UNIOS&gt;</code> <span data-lang="en">prompt gives access to a real low-level shell.</span>
+    </p>
+    <div class="overflow-x-auto">
+      <table class="uos-table">
+        <thead>
+          <tr><th><span data-lang="fr">Commande</span><span data-lang="en">Command</span></th><th><span data-lang="fr">Action</span><span data-lang="en">Action</span></th></tr>
+        </thead>
+        <tbody class="text-gray-400">
+          <tr><td><code class="inline-code">help</code></td><td><span data-lang="fr">Liste toutes les commandes</span><span data-lang="en">Lists all commands</span></td></tr>
+          <tr><td><code class="inline-code">cpu</code></td><td><span data-lang="fr">Vendor, mode 64/32-bit, family/model/stepping, marque CPU</span><span data-lang="en">Vendor, 64/32-bit mode, family/model/stepping, CPU brand</span></td></tr>
+          <tr><td><code class="inline-code">mem</code></td><td><span data-lang="fr">Carte mémoire E820 complète</span><span data-lang="en">Full E820 memory map</span></td></tr>
+          <tr><td><code class="inline-code">arch</code></td><td><span data-lang="fr">Résumé plateforme (CPU + RAM + disque)</span><span data-lang="en">Platform summary (CPU + RAM + drive)</span></td></tr>
+          <tr><td><code class="inline-code">disk</code></td><td><span data-lang="fr">Géométrie disque via BIOS INT 13h</span><span data-lang="en">Disk geometry via BIOS INT 13h</span></td></tr>
+          <tr><td><code class="inline-code">kbd</code></td><td><span data-lang="fr">Fait défiler 12 préréglages clavier</span><span data-lang="en">Cycles through 12 keyboard presets</span></td></tr>
+          <tr><td><code class="inline-code">lg &lt;locale&gt;</code></td><td><span data-lang="fr">Change la locale parmi 12 (en-us, fr-fr, de-de…)</span><span data-lang="en">Sets locale among 12 (en-us, fr-fr, de-de…)</span></td></tr>
+          <tr><td><code class="inline-code">install</code></td><td><span data-lang="fr">Guide d'installation du Stage 3</span><span data-lang="en">Stage 3 installation guide</span></td></tr>
+          <tr><td><code class="inline-code">clear</code> / <code class="inline-code">reboot</code> / <code class="inline-code">exit</code></td><td><span data-lang="fr">Efface l'écran / redémarre / éteint</span><span data-lang="en">Clear screen / reboot / power off</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Vision long terme -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-6 flex items-center">
+      <span class="mr-2">🔌</span> <span data-lang="fr">Modes & virtualisation</span><span data-lang="en">Modes & virtualization</span>
+    </h2>
+    <div class="grid md:grid-cols-2 gap-4 mb-6">
+      <div class="border border-[var(--border)] rounded-lg p-4">
+        <h3 class="text-white font-medium mb-1"><span data-lang="fr">Mode 1 — Installation complète</span><span data-lang="en">Mode 1 — Full install</span></h3>
+        <p class="text-sm text-gray-500"><span data-lang="fr">Accès BIOS/UEFI natif, contrôle total du boot. L'OS d'origine devient une fenêtre isolée dans UNIOS.</span><span data-lang="en">Native BIOS/UEFI access, full boot control. The original OS becomes an isolated window inside UNIOS.</span></p>
+      </div>
+      <div class="border border-[var(--border)] rounded-lg p-4">
+        <h3 class="text-white font-medium mb-1"><span data-lang="fr">Mode 2 — Application</span><span data-lang="en">Mode 2 — Application</span></h3>
+        <p class="text-sm text-gray-500"><span data-lang="fr">Sans droits admin : périphériques et stockage reliés entre machines par le réseau.</span><span data-lang="en">No admin rights: devices and storage linked across machines over the network.</span></p>
+      </div>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="uos-table">
+        <thead>
+          <tr>
+            <th><span data-lang="fr">Technique</span><span data-lang="en">Technique</span></th>
+            <th><span data-lang="fr">Quand</span><span data-lang="en">When</span></th>
+            <th><span data-lang="fr">Compromis</span><span data-lang="en">Trade-off</span></th>
+          </tr>
+        </thead>
+        <tbody class="text-gray-400">
+          <tr><td><span data-lang="fr">Virtualisation</span><span data-lang="en">Virtualization</span></td><td><span data-lang="fr">Même architecture CPU</span><span data-lang="en">Same CPU architecture</span></td><td><span data-lang="fr">Rapide, proche du natif</span><span data-lang="en">Fast, near-native</span></td></tr>
+          <tr><td><span data-lang="fr">Émulation</span><span data-lang="en">Emulation</span></td><td><span data-lang="fr">Architectures différentes</span><span data-lang="en">Different architectures</span></td><td><span data-lang="fr">Flexible, plus lent</span><span data-lang="en">Flexible, slower</span></td></tr>
+          <tr><td><span data-lang="fr">Traduction binaire</span><span data-lang="en">Binary translation</span></td><td><span data-lang="fr">Compromis entre les deux</span><span data-lang="en">Middle ground</span></td><td><span data-lang="fr">Adapte des blocs binaires entre architectures</span><span data-lang="en">Adapts binary blocks across architectures</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Build & run -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-2 flex items-center">
+      <span class="mr-2">🚀</span> <span data-lang="fr">Compiler et lancer</span><span data-lang="en">Build and run</span>
+    </h2>
+    <p class="text-gray-500 text-sm mb-5">
+      <span data-lang="fr">Prérequis : NASM, Python 3, et QEMU pour tester sans risquer de matériel réel.</span>
+      <span data-lang="en">Prerequisites: NASM, Python 3, and QEMU to test without risking real hardware.</span>
+    </p>
+    <div class="flex gap-2 mb-3">
+      <button class="tab-btn active" data-pane="win">Windows</button>
+      <button class="tab-btn" data-pane="nix">Linux / macOS</button>
+    </div>
+    <div class="build-pane active" id="pane-win">
+      <pre class="codeblock mono"><span class="c">REM build.bat détecte NASM et Python automatiquement</span>
+build.bat
+run_x86_64.bat   <span class="c">REM ou run_x86_32.bat</span></pre>
+    </div>
+    <div class="build-pane" id="pane-nix">
+      <pre class="codeblock mono"><span class="c"># compilation des trois stages</span>
+mkdir -p build
+nasm -f bin stage0.asm -o build/stage0.bin -l build/stage0.lst
+nasm -f bin stage1.asm -o build/stage1.bin -l build/stage1.lst
+nasm -f bin stage2.asm -o build/stage2.bin -l build/stage2.lst
+python3 create_image.py
+
+<span class="c"># lancement dans QEMU</span>
+qemu-system-x86_64 -drive format=raw,file=build/unios.img</pre>
+    </div>
+    <p class="text-sm text-gray-500 mt-4">
+      <span data-lang="fr">Pour démarrer sur du matériel réel, voir <code class="inline-code">USB_BOOT_GUIDE.md</code> dans le dépôt.</span>
+      <span data-lang="en">To boot on real hardware, see <code class="inline-code">USB_BOOT_GUIDE.md</code> in the repository.</span>
+    </p>
+  </section>
+
+  <!-- Roadmap -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-4 flex items-center">
+      <span class="mr-2">🗺️</span> <span data-lang="fr">Feuille de route</span><span data-lang="en">Roadmap</span>
+    </h2>
+    <ul class="list-disc list-inside text-gray-400 space-y-2 text-sm">
+      <li><span data-lang="fr"><strong class="text-gray-200">Stage 3a</strong> — mode protégé 32 bits : GDT, paging.</span><span data-lang="en"><strong class="text-gray-200">Stage 3a</strong> — 32-bit protected mode: GDT, paging.</span></li>
+      <li><span data-lang="fr"><strong class="text-gray-200">Stage 3b</strong> — mode long 64 bits : PAE, page tables, EFER MSR.</span><span data-lang="en"><strong class="text-gray-200">Stage 3b</strong> — 64-bit long mode: PAE, page tables, EFER MSR.</span></li>
+      <li><span data-lang="fr"><strong class="text-gray-200">Stage 4</strong> — hyperviseur : VT-x/AMD-V, partage de périphériques, UEFI.</span><span data-lang="en"><strong class="text-gray-200">Stage 4</strong> — hypervisor: VT-x/AMD-V, device sharing, UEFI.</span></li>
+      <li><span data-lang="fr"><strong class="text-gray-200">UNIASM</strong> — backend ARM, devenir la chaîne de build officielle.</span><span data-lang="en"><strong class="text-gray-200">UNIASM</strong> — ARM backend, become the official build chain.</span></li>
+      <li><span data-lang="fr"><strong class="text-gray-200">Portages</strong> — ARM/Raspberry Pi, Android, iOS.</span><span data-lang="en"><strong class="text-gray-200">Ports</strong> — ARM/Raspberry Pi, Android, iOS.</span></li>
+    </ul>
+  </section>
+
+  <!-- Links -->
+  <section class="glass-card p-8">
+    <h2 class="text-2xl font-semibold text-white mb-4 flex items-center">
+      <span class="mr-2">📚</span> <span data-lang="fr">Documentation</span><span data-lang="en">Documentation</span>
+    </h2>
+    <div class="flex flex-wrap gap-3 badge-container">
+      <a href="https://github.com/Floodfield-Sudio/UNIOS" target="_blank" class="project-link">GitHub →</a>
+      <a href="https://github.com/Floodfield-Sudio/UNIOS/blob/main/TECHNICAL.md" target="_blank" class="project-link">TECHNICAL.md →</a>
+      <a href="https://github.com/Floodfield-Sudio/UNIOS/blob/main/GUIDE.md" target="_blank" class="project-link">GUIDE.md →</a>
+      <a href="https://github.com/Floodfield-Sudio/UNIOS/blob/main/USB_BOOT_GUIDE.md" target="_blank" class="project-link">USB_BOOT_GUIDE.md →</a>
+      <a href="https://github.com/Floodfield-Sudio/UNIOS/issues" target="_blank" class="project-link">Issues →</a>
+    </div>
+  </section>
+
+</main>
+
+<!-- Footer -->
+<footer class="mt-16 pb-8 text-center text-gray-600 text-sm">
+  <p>© 2026 Floodfield Studios. <span data-lang="fr">Tous droits réservés.</span><span data-lang="en">All rights reserved.</span></p>
+</footer>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const html = document.documentElement;
+  const btnFr = document.getElementById('btn-fr');
+  const btnEn = document.getElementById('btn-en');
+  const storageKey = 'siteLang';
+
+  function setButtons(lang) {
+    if (btnFr) btnFr.classList.toggle('active', lang === 'fr');
+    if (btnEn) btnEn.classList.toggle('active', lang === 'en');
+  }
+  function applyLanguage(lang) {
+    html.setAttribute('data-active', lang);
+    html.lang = lang;
+    localStorage.setItem(storageKey, lang);
+    setButtons(lang);
+  }
+  applyLanguage(localStorage.getItem(storageKey) || 'fr');
+  if (btnFr) btnFr.addEventListener('click', () => applyLanguage('fr'));
+  if (btnEn) btnEn.addEventListener('click', () => applyLanguage('en'));
+
+  // Build tabs (Windows / Linux)
+  const tabs = document.querySelectorAll('.tab-btn');
+  tabs.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabs.forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.build-pane').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('pane-' + btn.dataset.pane).classList.add('active');
+    });
+  });
+});
+</script>
+</body>
+</html>
